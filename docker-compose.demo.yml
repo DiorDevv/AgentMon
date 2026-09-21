@@ -1,0 +1,17 @@
+# Jonli demo: demo tarmoq trafigini NSEL ko'rinishida Logstash'ga yuboradi.
+# FAQAT sinov uchun. Real FTD/AD/Cortex/KSC ulanganda bu faylni ishlatmang.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+services:
+  demo-traffic:
+    image: agentmon-backend:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://agentmon:${POSTGRES_PASSWORD}@postgres:5432/agentmon
+      DEMO_LIVE: "yes"
+      DEMO_COLLECTOR: logstash
+    command: ["python", "-m", "agentmon.demo_live"]
+    restart: unless-stopped
+    depends_on:
+      - logstash
+      - postgres

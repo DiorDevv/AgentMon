@@ -1,0 +1,85 @@
+name: agentmon
+
+x-backend: &backend
+  build: ./backend
+  image: agentmon-backend:latest
+  env_file: .env
+  environment:
+    # Parol bir joyda (POSTGRES_PASSWORD) — URL avtomatik yig'iladi. Parolda faqat harf/raqam ishlating.
+    DATABASE_URL: postgresql://agentmon:${POSTGRES_PASSWORD}@postgres:5432/agentmon
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # NSEL (NetFlow v9) qabul qiladi, dekodlaydi va ixcham JSON'ni Redis'ga yozadi.
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.15.3
+    restart: unless-stopped
+    environment:
+      LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms2g -Xmx2g}
+      REDIS_KEY: ${REDIS_KEY:-nsel}
+    volumes:
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - logstash-data:/usr/share/logstash/data
+    ports:
+      - "${NSEL_PORT:-2055}:2055/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # Bufer: engine to'xtab qolsa ham hodisalar yo'qolmaydi (maxmemory'gacha).
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "1gb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agentmon
+      POSTGRES_USER: agentmon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env da berilishi shart}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentmon -d agentmon"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Signal + inventar + qoidalar. Faqat bitta nusxa ishlashi kerak.
+  engine:
+    <<: *backend
+    command: ["python", "-m", "agentmon.engine"]
+    stop_grace_period: 30s   # to'xtashda signallarni DB'ga yozib ulgurishi uchun
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "agentmon.api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "2", "--proxy-headers"]
+
+  web:
+    build: ./web
+    image: agentmon-web:latest
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+
+volumes:
+  pg-data:
+  logstash-data:
