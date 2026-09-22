@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import ssl
 from functools import lru_cache
 
+from ldap3 import Tls
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Qo'llab-quvvatlanadigan mahsulotlar (tartib o'zgarmaydi). "ad" uchun tarmoq signali — DC'larga trafik.
@@ -56,7 +59,13 @@ class Settings(BaseSettings):
     ksc_bases_max_age_hours: int = 72
     mass_outage_ratio: float = 0.2
     mass_outage_min: int = 20
+    # Ommaviy uzilishda holatlar ko'pi bilan shuncha ushlab turiladi, keyin haqiqiy holatga o'tkaziladi.
+    mass_outage_max_hold: int = 4 * 3600
     collector_stale: int = 180
+    # Bitta FTD'dan shuncha vaqt NetFlow kelmasa (va jimlik keskin bo'lsa) — "FTD'dan NetFlow kelmayapti" insidenti.
+    exporter_stale: int = 600
+    # NetFlow yuborishga ruxsat etilgan FTD IP'lari (Logstash ham, engine ham tekshiradi). Bo'sh = hammasi.
+    nsel_exporters: str = ""
     debounce: int = 2
     include_servers: bool = False
     # Tekshiriladigan mahsulotlar. Masalan AD hali ulanmagan bo'lsa: cortex,ksc,si
@@ -75,6 +84,7 @@ class Settings(BaseSettings):
     ad_user: str = ""
     ad_password: str = ""
     ad_verify_tls: bool = False
+    ad_ca_file: str = ""          # ichki CA (PEM) — DC sertifikatini tekshirish uchun
     ad_dns_zone: str = ""
     ad_stale_days: int = 45
 
@@ -89,15 +99,19 @@ class Settings(BaseSettings):
     ksc_domain: str = ""
     ksc_internal_user: bool = True
     ksc_verify_tls: bool = False
+    ksc_ca_file: str = ""         # KSC sertifikati yoki uning CA'si (PEM)
     ksc_filter: str = "(KLHST_WKS_FROM_UNASSIGNED = 0)"
 
     web_secret: str = ""
     web_auth: str = "ldap"
     web_allowed_group: str = ""
+    # O'zgartirish huquqi (hostni istisno qilish, IP'ni yashirish) shu AD guruhi a'zolarida.
+    # Bo'sh bo'lsa — WEB_ALLOWED_GROUP'dagi hamma (tavsiya etilmaydi).
+    web_admin_group: str = ""
     web_admin_user: str = ""
     web_admin_password_hash: str = ""
     web_session_hours: int = 12
-    web_cookie_secure: bool = False   # HTTPS orqali ochilsa true qiling
+    web_cookie_secure: bool = True    # web faqat HTTPS orqali ishlaydi
 
     @property
     def products(self) -> tuple[str, ...]:
@@ -117,6 +131,29 @@ class Settings(BaseSettings):
             "ksc": self.thresh_ksc,
             "si": self.thresh_si,
         }
+
+
+# .env.example'ning oldingi versiyalaridagi namunaviy qiymatlar — hech qachon ishlatilmasligi kerak.
+KNOWN_SAMPLE_SECRETS = frozenset({
+    "3f9a1c7e5b2d8f604a1e9c3b7d5f2a8e6c4b1d9f",
+    "b7e4c1a9f2d85e3b6a0c7f1d9e4b2a8c5f3e7d1b9a6c4e2f8d0b3a5c7e9f1d2b",
+})
+
+
+def ldap_tls(s: Settings) -> Tls:
+    """AD ulanishi uchun TLS sozlamasi (engine inventari ham, web login ham)."""
+    if not s.ad_verify_tls:
+        return Tls(validate=ssl.CERT_NONE)
+    if s.ad_ca_file and not os.path.isfile(s.ad_ca_file):
+        raise RuntimeError(f"AD_CA_FILE topilmadi: {s.ad_ca_file} (fayl ./ca/ papkasida bo'lishi kerak)")
+    return Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=s.ad_ca_file or None)
+
+
+def ksc_verify(s: Settings) -> bool | str:
+    """httpx `verify` qiymati: o'chirilgan, tizim CA'lari yoki berilgan fayl."""
+    if not s.ksc_verify_tls:
+        return False
+    return s.ksc_ca_file or True
 
 
 @lru_cache

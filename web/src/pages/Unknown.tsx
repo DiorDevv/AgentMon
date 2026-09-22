@@ -6,6 +6,7 @@ import { ago, duration, fmtDate, fmtInt } from "../format";
 import { useApi } from "../hooks";
 import { PRODUCT_COLOR, PRODUCT_SHORT } from "../labels";
 import type { Product } from "../types";
+import { canEdit } from "../session";
 
 interface Device {
   ip: string;
@@ -15,6 +16,7 @@ interface Device {
   last_seen: string;
   signals: Partial<Record<string, string>>;
   dns_name: string | null;
+  prev_owner: string | null;
 }
 
 interface Ignored {
@@ -59,7 +61,7 @@ export function Unknown() {
 
   const needle = q.trim().toLowerCase();
   const rows = (data ?? []).filter((d) => !needle || d.ip.includes(needle) || (d.site ?? "").toLowerCase().includes(needle) || (d.dns_name ?? "").includes(needle));
-  const withDc = (data ?? []).filter((d) => d.signals.ad).length;
+  const withDc = (data ?? []).filter((d) => d.signals["ad-auth"]).length;
   const total = data?.length ?? 0;
   const visible = rows.slice(0, shown);
 
@@ -113,10 +115,15 @@ export function Unknown() {
             </thead>
             <tbody>
               {visible.map((d) => (
-                <tr key={d.ip} className={dcKnown && !d.signals.ad ? "sev" : ""} style={dcKnown && !d.signals.ad ? { ["--sev" as string]: "var(--critical)" } : undefined}>
+                <tr key={d.ip} className={dcKnown && !d.signals["ad-auth"] ? "sev" : ""} style={dcKnown && !d.signals["ad-auth"] ? { ["--sev" as string]: "var(--critical)" } : undefined}>
                   <td>
                     <span className="mono" style={{ fontWeight: 600 }}>{d.ip}</span>
                     {d.dns_name && <div className="host-sub">{d.dns_name}</div>}
+                    {d.prev_owner && (
+                      <div className="host-sub" title="Bu IP oldin shu kompyuterga tegishli edi, lekin joriy seansda tasdiqlanmadi (DHCP IP'ni boshqa qurilmaga bergan bo'lishi mumkin)">
+                        oldin: {d.prev_owner}
+                      </div>
+                    )}
                   </td>
                   <td className="nowrap">{d.site ?? "—"}</td>
                   <td>
@@ -124,7 +131,7 @@ export function Unknown() {
                       <span className="muted" title="DC IP'lari ma'lum emas (AD ulanmagan, DC_IPS bo'sh) — domen a'zoligini aniqlab bo'lmaydi">
                         DC ma'lum emas
                       </span>
-                    ) : d.signals.ad ? (
+                    ) : d.signals["ad-auth"] ? (
                       <span className="pill" style={{ ["--c" as string]: "var(--warning)" }} title="DC bilan Kerberos/LDAP trafigi bor — domen kompyuteri, lekin nomi inventarga bog'lanmadi">
                         Domen a'zosi, nomi aniqlanmadi
                       </span>
@@ -152,8 +159,10 @@ export function Unknown() {
                         <button className="btn sm primary" onClick={() => ignore(d.ip)} aria-label="Saqlash"><Check size={14} /></button>
                         <button className="btn sm" onClick={() => setEditing(null)} aria-label="Bekor qilish"><X size={14} /></button>
                       </span>
-                    ) : (
+                    ) : canEdit() ? (
                       <button className="btn sm" onClick={() => (setEditing(d.ip), setNote(""))}><EyeOff size={14} />Ma'lum qurilma</button>
+                    ) : (
+                      <span className="muted">—</span>
                     )}
                   </td>
                 </tr>
@@ -194,7 +203,7 @@ export function Unknown() {
                     <td>{r.note ?? <span className="muted">—</span>}</td>
                     <td>{r.created_by ?? "—"}</td>
                     <td className="ink-2">{fmtDate(r.created_at)}</td>
-                    <td className="r"><button className="btn sm" onClick={() => restore(r.ip)}><RotateCcw size={14} />Qaytarish</button></td>
+                    <td className="r">{canEdit() && <button className="btn sm" onClick={() => restore(r.ip)}><RotateCcw size={14} />Qaytarish</button>}</td>
                   </tr>
                 ))}
               </tbody>

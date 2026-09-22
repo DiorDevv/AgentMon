@@ -7,6 +7,7 @@ import { ago, duration, fmtDate } from "../format";
 import { useApi } from "../hooks";
 import { PRODUCT_NAMES, PRODUCTS, STATE_COLOR, STATE_HELP, stateLabel } from "../labels";
 import type { Product, State } from "../types";
+import { canEdit } from "../session";
 
 interface ConsoleInfo {
   display_name: string;
@@ -109,7 +110,7 @@ export function HostDetail() {
             <div><dt>Inventarda</dt><dd>{h.sources.map((s) => SOURCE_NAMES[s] ?? s).join(", ") || "—"}</dd></div>
           </dl>
         </div>
-        <ExcludeControl id={h.id} excluded={h.excluded} note={h.note} onDone={reload} />
+        {canEdit() && <ExcludeControl id={h.id} excluded={h.excluded} note={h.note} onDone={reload} />}
       </div>
 
       {h.excluded && (

@@ -36,11 +36,11 @@ export interface ProductSummary {
 
 export interface Incident {
   id: number;
-  kind: "mass_outage" | "collector_stale";
+  kind: "mass_outage" | "collector_stale" | "exporter_stale";
   product: Product | null;
   started_at: string;
   ended_at?: string | null;
-  details: Record<string, number>;
+  details: { silent?: number; base?: number; ratio?: number; escalated?: boolean; escalated_at?: string; exporter?: string; state?: string };
 }
 
 export interface CollectorStatus {
@@ -50,6 +50,9 @@ export interface CollectorStatus {
   by_event: Record<string, number>;
   eps: number;
   queue: number | null;
+  buffer_pct?: number | null;
+  rejected?: number;
+  exporters?: Record<string, { last_rx: string | null; received: number; state: "ok" | "quiet" | "stale" | "missing" }>;
   last_rx: string | null;
   stale: boolean;
   update_events_seen: boolean;

@@ -1,14 +1,24 @@
 name: agentmon
 
+# Docker loglari standart holatda cheksiz o'sadi — har servis uchun 5 x 50 MB bilan cheklanadi.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 x-backend: &backend
   build: ./backend
   image: agentmon-backend:latest
   env_file: .env
+  volumes:
+    - ./ca:/app/ca:ro             # ichki CA / KSC sertifikatlari (AD_CA_FILE, KSC_CA_FILE)
   environment:
     # Parol bir joyda (POSTGRES_PASSWORD) — URL avtomatik yig'iladi. Parolda faqat harf/raqam ishlating.
     DATABASE_URL: postgresql://agentmon:${POSTGRES_PASSWORD}@postgres:5432/agentmon
     REDIS_URL: redis://redis:6379/0
   restart: unless-stopped
+  logging: *logging
   depends_on:
     postgres:
       condition: service_healthy
@@ -20,10 +30,12 @@ services:
   logstash:
     image: docker.elastic.co/logstash/logstash:8.15.3
     restart: unless-stopped
+    logging: *logging
     environment:
       LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms2g -Xmx2g}
       REDIS_KEY: ${REDIS_KEY:-nsel}
       NSEL_WORKERS: ${NSEL_WORKERS:-4}          # NetFlow dekoder oqimlari (CPU yadrolari soniga qarab)
+      NSEL_EXPORTERS: ${NSEL_EXPORTERS:-}       # faqat shu FTD IP'laridan NetFlow qabul qilinadi
     volumes:
       - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
@@ -44,9 +56,11 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
+    logging: *logging
     # Bufer: engine to'xtab qolsa ham hodisalar yo'qolmaydi (maxmemory'gacha).
+    # O'lchangan: 1 hodisa ~105 bayt. 1 GB = ~10 mln hodisa = 10 ming/s da ~17 daqiqa (REDIS_MAXMEMORY bilan oshiring).
     command: ["redis-server", "--save", "", "--appendonly", "no",
-              "--maxmemory", "1gb", "--maxmemory-policy", "noeviction"]
+              "--maxmemory", "${REDIS_MAXMEMORY:-2gb}", "--maxmemory-policy", "noeviction"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -56,6 +70,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_DB: agentmon
       POSTGRES_USER: agentmon
@@ -73,18 +88,42 @@ services:
     <<: *backend
     command: ["python", "-m", "agentmon.engine"]
     stop_grace_period: 30s   # to'xtashda signallarni DB'ga yozib ulgurishi uchun
+    healthcheck:
+      # Engine har 5 soniyada heartbeat faylini yangilaydi; event loop osilsa, ichki watchdog jarayonni to'xtatadi.
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time() - os.path.getmtime('/tmp/agentmon-engine.alive') > 60)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   api:
     <<: *backend
     command: ["uvicorn", "agentmon.api.main:app", "--host", "0.0.0.0", "--port", "8000",
-              "--workers", "2", "--proxy-headers"]
+              "--workers", "2", "--proxy-headers",
+              # api porti tashqariga ochilmagan — unga faqat web (nginx) konteyneri murojaat qiladi, u esa
+              # X-Forwarded-For'ni o'zi o'rnatadi. Shuning uchun header'ga ishonish xavfsiz.
+              "--forwarded-allow-ips", "*"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   web:
     build: ./web
     image: agentmon-web:latest
     restart: unless-stopped
+    logging: *logging
+    environment:
+      WEB_HTTPS_PORT: ${WEB_HTTPS_PORT:-8443}   # HTTP -> HTTPS yo'naltirishda ishlatiladi (tashqi port)
+      WEB_TLS_CN: ${WEB_TLS_CN:-agentmon}
+      WEB_TLS_SAN: ${WEB_TLS_SAN:-}
+    volumes:
+      - ./certs:/etc/nginx/certs               # tls.crt + tls.key (bo'lmasa o'z-o'zidan imzolangani yaratiladi)
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_BIND:-0.0.0.0}:${WEB_HTTPS_PORT:-8443}:443"
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8088}:80"      # faqat HTTPS'ga yo'naltiradi
     depends_on:
       - api
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from agentmon.config import Settings
+from agentmon.config import Settings, ksc_verify
 from agentmon.engine.inventory import http
 from agentmon.model import ConsoleRecord, dedupe_latest, norm_host
 
@@ -68,7 +68,8 @@ def _ip(v) -> str | None:
 def to_record(h: dict, now: datetime, bases_max_age: timedelta) -> ConsoleRecord | None:
     h = {k: _unwrap(v) for k, v in h.items()}
     display = h.get("KLHST_WKS_WINHOSTNAME") or h.get("KLHST_WKS_DN") or h.get("KLHST_WKS_FQDN")
-    name = norm_host(display)
+    # To'liq nom (FQDN) afzal: WINHOSTNAME 15 belgiga qisqartirilgan NetBIOS nomi.
+    name = norm_host(h.get("KLHST_WKS_FQDN")) or norm_host(display)
     status = int(h.get("KLHST_WKS_STATUS") or 0)
     # Network Agent yo'q hostlar (masalan, tarmoq skani orqali topilganlar) — agent o'rnatilmagan.
     if not name or not status & ST_NAGENT_INSTALLED:
@@ -113,7 +114,7 @@ async def fetch(s: Settings) -> list[ConsoleRecord]:
     now = datetime.now(timezone.utc)
     max_age = timedelta(hours=s.ksc_bases_max_age_hours)
 
-    async with httpx.AsyncClient(verify=s.ksc_verify_tls, timeout=120,
+    async with httpx.AsyncClient(verify=ksc_verify(s), timeout=120,
                                  headers={"Content-Type": "application/json"}) as client:
         await http.post(client, base + "login", headers={"Authorization": auth})
 

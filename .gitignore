@@ -8,3 +8,8 @@ web/dist/
 samples/
 *.pcap
 *.pcapng
+
+# TLS sertifikat va kalit — hech qachon git'ga tushmasin
+certs/
+ca/
+web/tsconfig.tsbuildinfo

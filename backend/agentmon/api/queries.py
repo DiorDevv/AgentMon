@@ -50,6 +50,7 @@ def effective(state: str | None, last_known: str | None) -> str | None:
 class _Cache:
     at: float = 0.0
     rows: list[dict] | None = None
+    version: object = None
 
 
 _cache = _Cache()
@@ -60,7 +61,10 @@ def invalidate() -> None:
 
 
 async def all_hosts(pool: asyncpg.Pool, products: tuple[str, ...] = PRODUCTS) -> list[dict]:
-    if _cache.rows is not None and time.monotonic() - _cache.at < CACHE_TTL:
+    # Kesh har worker'da alohida: boshqa worker hostni istisno qilgan bo'lsa (host.updated_at o'zgaradi),
+    # bu arzon so'rov keshni darhol eskirgan deb topadi.
+    version = await pool.fetchval("SELECT max(updated_at) FROM host")
+    if _cache.rows is not None and _cache.version == version and time.monotonic() - _cache.at < CACHE_TTL:
         return _cache.rows
     rows = await pool.fetch(
         """SELECT h.id, h.display_name, h.fqdn, h.os, h.site, h.sources, h.excluded, h.note, h.last_alive,
@@ -95,7 +99,7 @@ async def all_hosts(pool: asyncpg.Pool, products: tuple[str, ...] = PRODUCTS) ->
             "recent": bool(last_alive and last_alive >= recent_after),
             "states": states, "problems": problems,
         })
-    _cache.rows, _cache.at = out, time.monotonic()
+    _cache.rows, _cache.at, _cache.version = out, time.monotonic(), version
     return out
 
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { api, setUnauthorizedHandler } from "./api";
 import { setProducts } from "./labels";
+import { setRole } from "./session";
 import { Layout } from "./components/Layout";
 import { HostDetail } from "./pages/HostDetail";
 import { Hosts } from "./pages/Hosts";
@@ -15,9 +16,10 @@ export default function App() {
 
   // Foydalanuvchi va yoqilgan mahsulotlar ro'yxati — sahifalar chizilishidan oldin.
   function loadMe() {
-    api<{ user: string; products?: string[] }>("/api/me")
+    api<{ user: string; role?: string; products?: string[] }>("/api/me")
       .then((r) => {
         setProducts(r.products);
+        setRole(r.role);
         setUser(r.user);
       })
       .catch(() => setUser(null));

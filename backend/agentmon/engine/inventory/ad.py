@@ -8,16 +8,15 @@ from __future__ import annotations
 
 import logging
 import socket
-import ssl
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from ldap3 import BASE, SIMPLE, SUBTREE, Connection, Server, Tls
+from ldap3 import BASE, SIMPLE, SUBTREE, Connection, Server
 from ldap3.core.exceptions import LDAPNoSuchObjectResult
 
-from agentmon.config import Settings
+from agentmon.config import Settings, ldap_tls
 from agentmon.engine.inventory.adns import parse_a_record
-from agentmon.model import ConsoleRecord, norm_host
+from agentmon.model import ConsoleRecord, netbios_key, norm_host
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +67,7 @@ class ADClient:
         self.s = s
 
     def _connect(self) -> Connection:
-        tls = Tls(validate=ssl.CERT_REQUIRED if self.s.ad_verify_tls else ssl.CERT_NONE)
+        tls = ldap_tls(self.s)
         server = Server(self.s.ad_server, use_ssl=self.s.ad_server.lower().startswith("ldaps"),
                         tls=tls, get_info=None, connect_timeout=10)
         # AD simple bind'da 'DOMAIN\user', UPN yoki DN qabul qilinadi. LDAPS tavsiya etiladi.
@@ -108,14 +107,15 @@ class ADClient:
         return inv
 
     def _computers(self, conn: Connection, now: datetime) -> tuple[list[ConsoleRecord], list[str]]:
-        attrs = ["cn", "dNSHostName", "operatingSystem", "operatingSystemVersion",
+        attrs = ["cn", "sAMAccountName", "dNSHostName", "operatingSystem", "operatingSystemVersion",
                  "userAccountControl", "lastLogonTimestamp", "whenCreated"]
         stale_before = now - timedelta(days=self.s.ad_stale_days)
         out: list[ConsoleRecord] = []
         dcs: list[str] = []
         for dn, a in self._paged(conn, self.s.ad_base_dn, "(objectCategory=computer)", attrs):
             cn = _s(a.get("cn"))
-            name = norm_host(cn)
+            # sAMAccountName ('PC-0412$') — NetBIOS nomi, domendagi haqiqiy noyob kalit.
+            name = norm_host(_s(a.get("sAMAccountName"))) or norm_host(cn)
             if not name:
                 continue
             uac = int(_s(a.get("userAccountControl")) or 0)
@@ -128,7 +128,7 @@ class ADClient:
             stale = last_logon is None or last_logon < stale_before
             reason = None if enabled else "AD'da kompyuter hisobi o'chirilgan (disabled)"
             out.append(ConsoleRecord(
-                product="ad", name=name, display_name=cn or name, healthy=enabled, reason=reason,
+                product="ad", name=name, display_name=(fqdn.split(".", 1)[0] if fqdn else None) or cn or name, healthy=enabled, reason=reason,
                 fqdn=fqdn, os=_s(a.get("operatingSystem")), last_seen=last_logon,
                 version=_s(a.get("operatingSystemVersion")),
                 details={"dn": dn, "enabled": enabled, "stale": stale,
@@ -167,7 +167,7 @@ class ADClient:
                     for blob in a.get("dnsRecord", []):
                         rec = parse_a_record(blob)
                         if rec:
-                            out.append(DnsA(rec[0], norm_host(node) or node.lower(), fqdn, rec[1]))
+                            out.append(DnsA(rec[0], netbios_key(node) or node.lower(), fqdn, rec[1]))
             if out:
                 break
         return out

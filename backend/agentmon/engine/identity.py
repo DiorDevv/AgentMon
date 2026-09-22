@@ -10,8 +10,11 @@ ko'rinadi, haqiqiy (balki begona) qurilma esa yashirinadi. Bunga qarshi uchta qo
 1. Bitta IP bir nechta nomga ko'rsatsa — eng yangi dalil g'olib.
 2. Agent hostning hozirgi IP'larini yangi xabar qilgan bo'lsa, o'sha host haqidagi
    eskiroq dalillar (boshqa IP'lardagi eski DNS yozuvlari) bekor qilinadi.
-3. Faqat eski DNS dalili bilan moslangan IP domen a'zosidek ishlashi kerak (DC bilan
-   trafik). Aks holda moslash ishonchsiz — IP "noma'lum qurilma" sifatida ko'rsatiladi.
+3. Hozir faol IP'ning dalili (DNS yoki agent) shu IP'ning joriy faollik seansidan OLDIN
+   olingan bo'lsa, u oldingi egasiga tegishli bo'lishi mumkin (kechqurun laptop ketdi,
+   ertalab DHCP IP'ni boshqa qurilmaga berdi). Bunday dalil joriy seansdagi trafik bilan
+   tasdiqlanishi shart: DNS uchun — DC bilan Kerberos/LDAP trafigi (domen a'zosi), agent uchun —
+   shu yoki agent serverlaridan biriga trafik. Aks holda moslash ishonchsiz — IP "noma'lum qurilma".
 """
 
 from __future__ import annotations
@@ -24,6 +27,10 @@ SOURCE_PRIORITY = {"cortex": 3, "ksc": 3, "dns": 1}
 AGENT_SOURCES = frozenset({"cortex", "ksc"})
 # Agent dalili shu qadar yangi bo'lsa, o'sha hostning eskiroq boshqa-IP dalillari bekor qilinadi.
 SUPERSEDE_MARGIN = 86400
+# 3-qoida: seansdan oldingi dalilni qaysi signal guruhlari tasdiqlay oladi.
+# DNS'ni faqat domen a'zoligi trafigi (Kerberos/LDAP, signals.AD_AUTH) tasdiqlaydi: agent trafigi agentli
+# begona qurilmada ham bo'ladi. (Guruh nomi signals.AD_AUTH bilan bir xil — bu modul I/O'siz qolishi uchun takrorlangan.)
+CORROBORATING = {"dns": ("ad-auth",), "cortex": ("ad-auth", "cortex", "ksc"), "ksc": ("ad-auth", "cortex", "ksc")}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,13 +80,16 @@ def resolve(candidates: list[Candidate], now: int, max_age: int) -> dict[str, Re
     return out
 
 
-def verify(resolved: dict[str, Resolved], now: int, trust_age: int,
-           has_dc_traffic: Callable[[str], bool]) -> dict[str, Resolved]:
-    """3-qoida: eski/statik DNS dalili faqat IP domen trafigini ko'rsatsa qabul qilinadi."""
+def verify(resolved: dict[str, Resolved], session_start: Callable[[str], int | None],
+           last_signal: Callable[[str, str], int | None]) -> dict[str, Resolved]:
+    """3-qoida. `session_start(ip)` — IP hozir faol bo'lsa joriy seans boshlangan vaqt, aks holda None.
+    `last_signal(ip, guruh)` — shu guruhga oxirgi trafik vaqti."""
     out = {}
     for ip, r in resolved.items():
-        if r.source == "dns" and (r.observed_at is None or now - r.observed_at > trust_age) \
-                and not has_dc_traffic(ip):
-            continue
+        since = session_start(ip)
+        if since is not None and (r.observed_at is None or r.observed_at < since):
+            groups = CORROBORATING.get(r.source, ("ad",))
+            if not any((last_signal(ip, g) or 0) >= since for g in groups):
+                continue
         out[ip] = r
     return out

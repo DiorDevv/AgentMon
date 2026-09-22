@@ -74,12 +74,13 @@ Unumdorlik: ingest bitta yadroda sekundiga ~250 ming hodisani qayta ishlaydi. 40
 
 ```bash
 cp .env.example .env
-# .env ni to'ldiring: parollar, AD, Cortex, KSC, WEB_SECRET (openssl rand -hex 32)
+# .env ni to'ldiring: parollar, AD, Cortex, KSC, NSEL_EXPORTERS (FTD IP'lari), WEB_SECRET (openssl rand -hex 32)
 chmod 600 .env
 docker compose up -d --build
+sudo ./deploy/docker-firewall.sh   # Docker portlari ufw'ni chetlab o'tadi — NetFlow/web shu skript bilan cheklanadi
 ```
 
-Web: `http://<server>:8080`. Kirish `WEB_ALLOWED_GROUP` guruhidagi domen hisoblari bilan.
+Web: `https://<server>:8443` (faqat HTTPS; sertifikat — `./certs/tls.crt` + `tls.key`, bo'lmasa o'z-o'zidan imzolangani yaratiladi). Kirish `WEB_ALLOWED_GROUP` guruhidagi domen hisoblari bilan.
 
 Favqulodda lokal admin (AD ishlamay qolgan holat uchun):
 

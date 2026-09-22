@@ -14,6 +14,10 @@ import orjson
 from agentmon.engine.classify import Classifier
 
 ANY = "any"
+# DC bilan faqat domen a'zosi bajaradigan trafik: Kerberos (88) va LDAP/CLDAP DC locator (389).
+# 445 (SMB) bunga kirmaydi — domensiz qurilma ham NTLM bilan DC'dagi papkaga ulana oladi.
+AD_AUTH = "ad-auth"
+AD_AUTH_PORTS = frozenset({88, 389})
 
 
 def denied_group(grp: str) -> str:
@@ -33,6 +37,13 @@ class Presence:
     first_seen: int
     alive_since: int   # joriy uzluksiz faollik seansi boshlangan vaqt
     last_seen: int
+    exporter: str = ""  # IP oxirgi marta qaysi FTD orqali ko'ringan (u jim bo'lsa host holati muzlatiladi)
+
+
+@dataclass(slots=True)
+class ExporterStat:
+    last_rx: int | None = None   # oxirgi hodisa (Logstash qabul qilgan vaqt)
+    received: int = 0
 
 
 @dataclass
@@ -44,11 +55,15 @@ class IngestStats:
     last_rx_wall: float | None = None   # oxirgi hodisa kelgan real vaqt
     watermark: int | None = None        # qayta ishlangan eng katta hodisa vaqti
     last_update_event: int | None = None
+    rejected: int = 0                   # ruxsat etilmagan eksporterdan kelgan hodisalar
+    exporters: dict[str, ExporterStat] = field(default_factory=dict)
 
 
 class SignalStore:
-    def __init__(self, alive_gap: int) -> None:
+    def __init__(self, alive_gap: int, allowed_exporters: frozenset[str] = frozenset()) -> None:
         self.alive_gap = alive_gap
+        # Bo'sh bo'lmasa — faqat shu FTD'lardan kelgan hodisalar qabul qilinadi (Logstash filtrining takrori).
+        self.allowed_exporters = allowed_exporters
         self.presence: dict[str, Presence] = {}
         self.last: dict[tuple[str, str], int] = {}
         self.dirty_presence: set[str] = set()
@@ -61,15 +76,17 @@ class SignalStore:
         self.last = last
 
     # --- asosiy yo'l ---
-    def observe(self, ip: str, site: str, grp: str | None, ts: int) -> None:
+    def observe(self, ip: str, site: str, grp: str | None, ts: int, exporter: str = "") -> None:
         p = self.presence.get(ip)
         if p is None:
-            self.presence[ip] = Presence(site, ts, ts, ts)
+            self.presence[ip] = Presence(site, ts, ts, ts, exporter)
         else:
-            if ts > p.last_seen:
+            if ts >= p.last_seen:
                 if ts - p.last_seen > self.alive_gap:
                     p.alive_since = ts   # uzilishdan keyin yangi seans
                 p.last_seen = ts
+                if exporter:
+                    p.exporter = exporter
             p.site = site
         self.dirty_presence.add(ip)
         if grp:
@@ -88,9 +105,20 @@ class SignalStore:
             dport = int(ev.get("dport") or 0)
             code = int(ev.get("ev") or 0)
             ts = int(ev["ts"])
+            exp = ev.get("exp") or ""
         except (orjson.JSONDecodeError, KeyError, TypeError, ValueError):
             st.malformed += 1
             return
+        if self.allowed_exporters and exp not in self.allowed_exporters:
+            st.rejected += 1
+            return
+        if exp:
+            es = st.exporters.get(exp)
+            if es is None:
+                es = st.exporters[exp] = ExporterStat()
+            es.received += 1
+            if es.last_rx is None or ts > es.last_rx:
+                es.last_rx = ts
         st.by_event[code] += 1
         if code == EV_UPDATE:
             st.last_update_event = ts
@@ -103,9 +131,11 @@ class SignalStore:
         grp = clf.target_group(dst, dport)
         if code == EV_DENIED:
             # Rad etilgan urinish host tirikligini isbotlaydi, lekin agent ishlashini emas.
-            self.observe(src, site, denied_group(grp) if grp else None, ts)
+            self.observe(src, site, denied_group(grp) if grp else None, ts, exp)
         else:
-            self.observe(src, site, grp, ts)
+            self.observe(src, site, grp, ts, exp)
+            if grp == "ad" and dport in AD_AUTH_PORTS:
+                self.observe(src, site, AD_AUTH, ts, exp)
         st.accepted += 1
         if st.watermark is None or ts > st.watermark:
             st.watermark = ts

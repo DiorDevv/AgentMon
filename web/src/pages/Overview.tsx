@@ -239,7 +239,16 @@ function Banners({ s }: { s: Summary }) {
         i.kind === "mass_outage" ? (
           <Banner key={i.id} title={`Ommaviy uzilish: ${PRODUCT_NAMES[i.product as Product]}`}>
             {i.details.silent} / {i.details.base} ta oldin ishlab turgan agent birdan jim bo'ldi ({fmtDate(i.started_at)} dan beri).
-            Bu alohida kompyuterlar emas, server yoki tarmoq muammosi bo'lishi mumkin — yangi xulosalar to'xtatib turilgan.
+            Bu alohida kompyuterlar emas, server yoki tarmoq muammosi bo'lishi mumkin
+            {i.details.escalated
+              ? <> — uzilish uzoq davom etgani uchun ({fmtDate(i.details.escalated_at ?? i.started_at)} dan) kompyuterlar haqiqiy holatida ko'rsatilmoqda. Agent serveri va unga yo'lni zudlik bilan tekshiring.</>
+              : " — yangi xulosalar vaqtincha to'xtatib turilgan."}
+          </Banner>
+        ) : i.kind === "exporter_stale" ? (
+          <Banner key={i.id} title={`FTD ${i.details.exporter}: NetFlow kelmayapti`}>
+            {i.details.state === "missing"
+              ? "Bu FTD NSEL_EXPORTERS ro'yxatida bor, lekin undan hech qachon NetFlow kelmagan — FTD'dagi flow-export sozlamasini tekshiring."
+              : `${fmtDate(i.started_at)} dan beri bu FTD'dan hodisa yo'q, garchi undan oldin ko'plab kompyuterlar faol bo'lgan. Uning ortidagi kompyuterlar oflayn ko'rinadi (oxirgi ma'lum holati saqlanadi) — FTD'dagi flow-export va unga yo'lni tekshiring.`}
           </Banner>
         ) : (
           <Banner key={i.id} title="NetFlow ma'lumoti kelmayapti">
