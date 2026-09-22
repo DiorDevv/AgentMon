@@ -30,6 +30,13 @@ services:
       - logstash-data:/usr/share/logstash/data
     ports:
       - "${NSEL_PORT:-2055}:2055/udp"
+    healthcheck:
+      # Sog'lom = NetFlow UDP 2055 porti haqiqatan tinglanmoqda (2055 = 0x0807). Pipeline ishga tushishi ~1 daqiqa.
+      test: ["CMD-SHELL", "grep -qi ':0807 ' /proc/net/udp /proc/net/udp6"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
     depends_on:
       redis:
         condition: service_healthy

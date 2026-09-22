@@ -1,4 +1,6 @@
-api.http.host: "0.0.0.0"
+# Monitoring API ishlatilmaydi (tizimga kerak emas) — ochiq port qoldirmaslik uchun o'chirilgan.
+# Konteyner sog'ligi docker-compose healthcheck orqali (UDP 2055 tinglanyaptimi) tekshiriladi.
+api.enabled: false
 xpack.monitoring.enabled: false
 pipeline.ecs_compatibility: disabled
 pipeline.batch.size: 1000

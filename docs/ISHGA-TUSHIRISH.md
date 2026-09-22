@@ -427,6 +427,8 @@ Bir necha soniyada 5 ta paket ko'rinishi kerak.
 | NetFlow kollektori → Oqim | 0 dan katta (odatda yuzlab yoki minglab hodisa/s) |
 | flow-update | 🟢 **kelmoqda** (5–10 daqiqadan keyin) |
 | Redis navbati | Kichik son (0–1000). Doimiy o'sib borsa, engine ulgurmayapti. |
+| `docker compose ps logstash` | `Up ... (healthy)`, ya'ni UDP 2055 tinglanmoqda |
+| `docker compose logs logstash \| grep receive_buffer` | Bo'sh bo'lishi kerak. `Unable to set receive_buffer_bytes` chiqsa, 1.3-qadam (sysctl) bajarilmagan |
 
 **Vaqt jadvali:**
 
