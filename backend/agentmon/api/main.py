@@ -280,8 +280,10 @@ async def host_exclude(host_id: int, body: ExcludeIn, request: Request, user: Us
 
 # ------------------------------------------------------------------ unknown devices
 @app.get("/api/unknown")
-async def unknown(request: Request, user: User, hours: int = Query(24, ge=1, le=720)):
-    rows = await pool(request).fetch(
+async def unknown(request: Request, user: User, hours: int = Query(24, ge=1, le=720),
+                  s: Settings = Depends(get_settings)):
+    p = pool(request)
+    rows = await p.fetch(
         """SELECT host(p.ip) AS ip, p.site, p.first_seen, p.alive_since, p.last_seen,
                   coalesce((SELECT jsonb_object_agg(grp, last_seen) FROM net_signal s
                             WHERE s.ip = p.ip AND s.last_seen > now() - interval '24 hours'), '{}') AS signals,
@@ -291,8 +293,10 @@ async def unknown(request: Request, user: User, hours: int = Query(24, ge=1, le=
            WHERE p.last_seen > now() - make_interval(hours => $1)
              AND NOT EXISTS (SELECT 1 FROM host_ip h WHERE h.ip = p.ip)
              AND NOT EXISTS (SELECT 1 FROM ip_ignore i WHERE i.ip = p.ip)
-           ORDER BY p.last_seen DESC LIMIT 5000""", hours)
-    return [dict(r) for r in rows]
+           ORDER BY p.last_seen DESC LIMIT 20000""", hours)
+    # DC'lar ma'lum bo'lmasa (AD'siz rejim, DC_IPS bo'sh) — "domen trafigi yo'q" degan xulosa chiqarib bo'lmaydi.
+    dc_known = bool(s.dc_ips.strip()) or bool(await p.fetchval("SELECT EXISTS (SELECT 1 FROM dc_server)"))
+    return {"items": [dict(r) for r in rows], "dc_known": dc_known}
 
 
 class IgnoreIn(BaseModel):

@@ -42,9 +42,10 @@ from agentmon.engine.rules import (
     evaluate,
 )
 from agentmon.engine.signals import EV_UPDATE, Presence, SignalStore, denied_group
-from agentmon.model import OK, ConsoleRecord, dedupe_latest
+from agentmon.model import CONFLICT, OK, SILENCE_STATES, ConsoleRecord, dedupe_latest
 
 log = logging.getLogger("agentmon.engine")
+_IDENTITY_SENSITIVE = SILENCE_STATES | {CONFLICT}
 UTC = timezone.utc
 CONSOLE_PRODUCTS = ("ad", "cortex", "ksc")
 REDIS_BATCH = 2000
@@ -54,6 +55,9 @@ DNS_TRUST_AGE = 2 * 86400         # bundan eski DNS dalili DC trafigi bilan tasd
 DC_TRAFFIC_WINDOW = 7 * 86400
 SIGNAL_RETENTION = 30 * 86400
 SUSPICIOUS_REPEATS = 3            # keskin kamaygan inventar shuncha marta takrorlansa — haqiqiy deb qabul qilinadi
+IDENTITY_FRESH = 86400            # IP->host dalili bundan eski bo'lsa, "jimlik" xulosasiga ogohlantirish qo'shiladi
+STALE_IDENTITY_NOTE = ("Diqqat: bu IP kompyuterga 1 kundan eski dalil bilan bog'langan — "
+                       "IP boshqa qurilmaga berilgan bo'lishi mumkin")
 
 
 def dt(ts: int | float | None) -> datetime | None:
@@ -506,6 +510,9 @@ class Engine:
                 if p and (best is None or p.last_seen > best.last_seen):
                     best = p
             alive = best is not None and ref - best.last_seen <= s.alive_window
+            evidence = [self.ip_map[ip][2] for ip in ips if ip in self.ip_map]
+            freshest = max((t for t in evidence if t is not None), default=None)
+            stale_identity = freshest is None or now_wall - freshest > IDENTITY_FRESH
             alive_for = ref - best.alive_since if alive else 0
             if best:
                 if ref - best.last_seen <= RECENT_HOST_SECONDS:
@@ -521,6 +528,9 @@ class Engine:
                                                   console, denied))
                 if not ips:
                     reason = "IP manzili aniqlanmadi yoki tasdiqlanmadi (DNS'da ham, agentlarda ham ishonchli dalil yo'q)"
+                elif state in _IDENTITY_SENSITIVE and stale_identity:
+                    # IP bu hostga eski dalil bilan bog'langan: DHCP IP'ni boshqa qurilmaga bergan bo'lishi mumkin.
+                    reason = f"{reason}. {STALE_IDENTITY_NOTE}"
                 silent = alive and (net_last is None or ref - net_last > thresholds[product])
                 cands[(h.id, product)] = (state, reason, silent, net_last)
                 if alive and alive_for >= judge_after[product]:

@@ -54,12 +54,29 @@ def nsel_packet(seq: int, records: list[tuple[str, str, int, int]]) -> bytes:
     return header + body
 
 
-def guard() -> None:
+DEMO_NAME_PATTERN = "^(tash|sam|bux|nam|and)-pc-[0-9]{4}$"
+
+
+async def guard(dsn: str) -> None:
+    """Soxta trafik hech qachon real muhitga aralashmasin.
+
+    Faqat konsollar tekshiruvi yetarli emas: 1-bosqichda (faqat FTD) konsollar hali ulanmagan bo'ladi.
+    Shuning uchun baza ham tekshiriladi — unda faqat demo seed yaratgan kompyuterlar bo'lishi shart.
+    """
     s = get_settings()
     if os.environ.get("DEMO_LIVE") != "yes":
         raise SystemExit("demo_live faqat DEMO_LIVE=yes bilan ishlaydi (docker-compose.demo.yml)")
     if s.ad_server or s.cortex_fqdn or s.ksc_url:
         raise SystemExit("Real manbalar sozlangan — demo trafik real muhitga aralashmasligi uchun ishga tushirilmaydi")
+    conn = await asyncpg.connect(dsn)
+    try:
+        demo, other = await conn.fetchrow(
+            "SELECT count(*) FILTER (WHERE name ~ $1), count(*) FILTER (WHERE name !~ $1) FROM host", DEMO_NAME_PATTERN)
+    finally:
+        await conn.close()
+    if not demo or other:
+        raise SystemExit("Bazada demo ma'lumot yo'q yoki real kompyuterlar bor — demo trafik ishga tushirilmaydi. "
+                         "Avval bo'sh bazada: python -m agentmon.demo --yes")
 
 
 async def keep_sources_fresh(dsn: str) -> None:
@@ -122,8 +139,8 @@ async def traffic(collector: tuple[str, int], n_hosts: int) -> None:
 
 
 async def main() -> None:
-    guard()
     s = get_settings()
+    await guard(s.database_url)
     host = os.environ.get("DEMO_COLLECTOR", "logstash")
     collector = (socket.gethostbyname(host), int(os.environ.get("DEMO_COLLECTOR_PORT", "2055")))
     n = int(os.environ.get("DEMO_HOSTS", "4000"))

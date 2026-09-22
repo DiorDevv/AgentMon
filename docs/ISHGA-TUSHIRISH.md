@@ -636,6 +636,7 @@ docker compose ps && curl -s http://localhost:8088/api/health
 | "flow-update kelmayapti" | `refresh-interval` sozlanmagan | FlexConfig'ga `flow-export active refresh-interval 5` qo'shing, Deploy qiling |
 | Oqim bor, lekin "Kuzatilayotgan IP" 0 | Subnetlar noto'g'ri | Tizim holati → Foydalanuvchi subnetlari. `USER_SUBNETS` ni tekshiring |
 | Redis navbati doimiy o'syapti | Engine ulgurmayapti | `docker compose logs engine`. Serverda CPU va RAM yetarli ekanini tekshiring |
+| Ba'zi kompyuterlar "tasodifiy" oflayn yoki jim ko'rinadi | UDP paketlar yo'qolyapti (Logstash ulgurmayapti) | `docker compose exec logstash sh -c "grep Udp: /proc/net/snmp"`: `RcvbufErrors` o'sib borsa, `deploy/ftd-netflow.md` → "Yuklama katta bo'lsa" |
 
 ### Active Directory
 

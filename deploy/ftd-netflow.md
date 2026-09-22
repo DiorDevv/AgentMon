@@ -41,6 +41,32 @@ AgentMon web interfeysida **Tizim holati → NetFlow (NSEL) kollektori** bo'limi
 - **Oqim** 0 dan katta bo'lishi kerak;
 - **flow-update** qatorida "kelmoqda" yozuvi chiqishi kerak (refresh-interval ishlayotganining belgisi).
 
+## 2a. Yuklama katta bo'lsa (paketlar yo'qolsa)
+
+Ish vaqtida 4000 kompyuter sekundiga 5–20 ming NSEL hodisasi berishi mumkin. Logstash ulgurmasa,
+UDP paketlar operatsion tizim darajasida **jimgina** yo'qoladi. Tekshirish (AgentMon serverida):
+
+```bash
+docker compose exec logstash sh -c "grep Udp: /proc/net/snmp"
+```
+
+Ikkinchi qatordagi `RcvbufErrors` ustuni **o'sib borsa**, paketlar yo'qolyapti. Yechimlar (tartib bilan):
+
+1. `.env` da `LS_JAVA_OPTS=-Xms2g -Xmx2g` qiling (RAM yetarli bo'lsa).
+2. FTD'da `teardown` hodisalarini o'chiring. Ular hajmning ~40% ini tashkil qiladi, lekin AgentMon uchun
+   `flow-create` va `flow-update` yetarli. `event-type all` qatori o'rniga:
+   ```
+   policy-map global_policy
+    class class-default
+     no flow-export event-type all destination <AGENTMON_SERVER_IP>
+     flow-export event-type flow-create destination <AGENTMON_SERVER_IP>
+     flow-export event-type flow-update destination <AGENTMON_SERVER_IP>
+     flow-export event-type flow-denied destination <AGENTMON_SERVER_IP>
+   ```
+3. Serverga CPU qo'shing (Logstash dekoderi CPU'ga bog'liq).
+
+> Pilot uchun `event-type all` qoldiring: namuna tahlilida to'liq ma'lumot kerak.
+
 ## 3. Firewall qoidasi
 
 AgentMon serveriga UDP/2055 ga barcha FTD'lardan (filiallar ham) kirishga ruxsat bering.

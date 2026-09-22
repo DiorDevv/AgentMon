@@ -32,12 +32,14 @@ def settings(dsn: str, **kw) -> Settings:
 
 @pytest.fixture
 async def engine(dsn):
+    # Baza engine ishga tushishidan OLDIN tozalanadi — aks holda engine oldingi testning ma'lumotini xotiraga yuklaydi.
+    from agentmon import db
+    pool = await db.create_pool(dsn, min_size=1, max_size=1)
+    await db.migrate(pool)
+    await pool.execute("TRUNCATE " + ", ".join(TABLES) + " RESTART IDENTITY CASCADE")
+    await pool.close()
     eng = Engine(settings(dsn))
     await eng.start()
-    await eng.pool.execute("TRUNCATE " + ", ".join(TABLES) + " RESTART IDENTITY CASCADE")
-    eng.tracked.clear()
-    eng.outages.clear()
-    eng.collector_incident = None
     yield eng
     await eng.close()
 
@@ -216,3 +218,58 @@ async def test_disabled_product_is_not_evaluated(dsn, engine):
     finally:
         await eng.close()
     engine.close = _noop  # type: ignore[method-assign]
+
+
+async def test_stale_identity_is_flagged_in_reason(engine):
+    """AD'siz rejim: IP hostga faqat eski agent dalili bilan bog'langan bo'lsa, jimlik xulosasi ogohlantirish oladi."""
+    from datetime import timedelta
+    now = await seed(engine)
+    engine.dns = []                                            # DNS yo'q (AD'siz rejim)
+    stale = engine.consoles["cortex"]["pc-03"]
+    stale.last_seen = datetime.fromtimestamp(now, UTC) - timedelta(days=3)
+    engine.store.last.pop(("10.10.0.4", "cortex"), None)      # pc-03 IP'sidan Cortex trafigi yo'q
+    await engine.evaluate_cycle()
+
+    t_stale = engine.tracked[(engine.hosts["pc-03"].id, "cortex")]
+    assert t_stale.state == "STOPPED" and "eski dalil" in t_stale.reason
+    t_fresh = engine.tracked[(engine.hosts["pc-04"].id, "cortex")]
+    assert t_fresh.state == "OK"
+    # Yangi dalil bilan bog'langan hostning jimlik xulosasida ogohlantirish bo'lmasligi kerak:
+    t_si = engine.tracked[(engine.hosts["pc-04"].id, "si")]
+    assert t_si.state == "NO_SIGNAL" and "eski dalil" not in t_si.reason
+
+
+async def test_demo_live_refuses_without_demo_data(dsn, engine, monkeypatch):
+    from agentmon import demo_live
+    from agentmon.config import get_settings
+    monkeypatch.setenv("DEMO_LIVE", "yes")
+    for k in ("AD_SERVER", "CORTEX_FQDN", "KSC_URL"):
+        monkeypatch.setenv(k, "")
+    get_settings.cache_clear()
+    with pytest.raises(SystemExit, match="demo"):
+        await demo_live.guard(dsn)                                 # bo'sh baza — 1-bosqich (faqat FTD) holati
+    await engine.pool.execute("INSERT INTO host (name, display_name, sources) VALUES ('buxgalter-01', 'X', '{ksc}')")
+    with pytest.raises(SystemExit):
+        await demo_live.guard(dsn)                                 # real kompyuter bor
+    await engine.pool.execute("DELETE FROM host")
+    await engine.pool.execute("INSERT INTO host (name, display_name, sources) VALUES ('tash-pc-0001', 'X', '{ad}')")
+    await demo_live.guard(dsn)                                     # faqat demo — ruxsat
+    get_settings.cache_clear()
+
+
+async def test_phase1_ftd_only_without_any_console(engine):
+    """1-bosqich: faqat NetFlow, hech qaysi konsol yo'q — engine xatosiz ishlaydi, IP'lar noma'lum qurilma bo'ladi."""
+    now = int(time.time())
+    for i in range(5):
+        engine.store.observe(f"10.10.1.{i + 1}", "Markaz", "cortex" if i % 2 else None, now - 30)
+    engine.store.stats.last_rx_wall = time.time()
+    engine.store.stats.watermark = now
+    engine.data_since = time.time() - 3600
+    await engine.flush()
+    await engine.evaluate_cycle()                                 # xato bermasligi kerak
+    assert not engine.hosts and not engine.tracked
+    unknown = await engine.pool.fetchval(
+        """SELECT count(*) FROM ip_presence p WHERE NOT EXISTS (SELECT 1 FROM host_ip h WHERE h.ip = p.ip)""")
+    assert unknown == 5
+    status = await engine.pool.fetchval("SELECT value->>'hosts' FROM system_status WHERE key = 'engine'")
+    assert status == "0"

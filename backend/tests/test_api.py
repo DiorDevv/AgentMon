@@ -66,6 +66,8 @@ async def test_endpoints_on_empty_db(client):
                  "/api/unknown/ignored", "/api/hosts.csv"):
         r = await client.get(path)
         assert r.status_code == 200, path
+    u = (await client.get("/api/unknown")).json()
+    assert set(u) == {"items", "dc_known"} and isinstance(u["items"], list)
     assert (await client.get("/api/hosts/999999")).status_code == 404
     assert (await client.get("/api/hosts?product=bogus")).status_code == 400
     assert (await client.post("/api/unknown/ignore", json={"ip": "not-ip"})).status_code == 400

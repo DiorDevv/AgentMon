@@ -24,6 +24,9 @@ interface Ignored {
   created_at: string;
 }
 
+const PAGE = 200;
+const API_LIMIT = 20000;
+
 const PERIODS = [
   [1, "1 soat"],
   [24, "24 soat"],
@@ -33,10 +36,13 @@ const PERIODS = [
 export function Unknown() {
   const [hours, setHours] = useState(24);
   const [q, setQ] = useState("");
-  const { data, reload } = useApi<Device[]>(`/api/unknown?hours=${hours}`, 60000);
+  const { data: resp, reload } = useApi<{ items: Device[]; dc_known: boolean }>(`/api/unknown?hours=${hours}`, 60000);
+  const data = resp?.items;
+  const dcKnown = resp?.dc_known ?? true;
   const { data: ignored, reload: reloadIgnored } = useApi<Ignored[]>("/api/unknown/ignored");
   const [editing, setEditing] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [shown, setShown] = useState(PAGE);
 
   async function ignore(ip: string) {
     await api("/api/unknown/ignore", { method: "POST", json: { ip, note } });
@@ -55,6 +61,7 @@ export function Unknown() {
   const rows = (data ?? []).filter((d) => !needle || d.ip.includes(needle) || (d.site ?? "").toLowerCase().includes(needle) || (d.dns_name ?? "").includes(needle));
   const withDc = (data ?? []).filter((d) => d.signals.ad).length;
   const total = data?.length ?? 0;
+  const visible = rows.slice(0, shown);
 
   return (
     <>
@@ -72,8 +79,14 @@ export function Unknown() {
 
       <div className="grid g-kpi" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         <Kpi label="Noma'lum qurilmalar" icon={Radar} tone="warn" value={data ? fmtInt(total) : "—"} sub="tanlangan davrda faol bo'lgan" />
-        <Kpi label="Domen trafigi yo'q" icon={ShieldQuestion} tone="bad" value={data ? fmtInt(total - withDc) : "—"}
-          sub="shaxsiy qurilma yoki domenga kirmagan kompyuter" />
+        {dcKnown ? (
+          <Kpi label="Domen trafigi yo'q" icon={ShieldQuestion} tone="bad" value={data ? fmtInt(total - withDc) : "—"}
+            sub="shaxsiy qurilma yoki domenga kirmagan kompyuter" />
+        ) : (
+          <Kpi label="Agent trafigi yo'q" icon={ShieldQuestion} tone="bad"
+            value={data ? fmtInt(data.filter((d) => !d.signals.cortex && !d.signals.ksc && !d.signals.si).length) : "—"}
+            sub="Cortex, Kaspersky va SI serverlariga murojaat yo'q" />
+        )}
         <Kpi label="Ma'lum deb belgilangan" icon={EyeOff} value={ignored ? fmtInt(ignored.length) : "—"} sub="printer, telefon va boshqalar" />
       </div>
 
@@ -81,9 +94,9 @@ export function Unknown() {
         <div className="toolbar">
           <div className="input-icon">
             <Search size={15} />
-            <input className="input" placeholder="IP, sayt yoki DNS nomi…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input className="input" placeholder="IP, sayt yoki DNS nomi…" value={q} onChange={(e) => { setQ(e.target.value); setShown(PAGE); }} />
           </div>
-          <span className="muted" style={{ marginLeft: "auto", fontSize: 13 }}>{fmtInt(rows.length)} ta ko'rsatilmoqda</span>
+          <span className="muted" style={{ marginLeft: "auto", fontSize: 13 }}>{fmtInt(rows.length)} ta topildi</span>
         </div>
         <div className="table-wrap">
           <table className="tbl">
@@ -99,15 +112,19 @@ export function Unknown() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((d) => (
-                <tr key={d.ip} className={d.signals.ad ? "" : "sev"} style={d.signals.ad ? undefined : { ["--sev" as string]: "var(--critical)" }}>
+              {visible.map((d) => (
+                <tr key={d.ip} className={dcKnown && !d.signals.ad ? "sev" : ""} style={dcKnown && !d.signals.ad ? { ["--sev" as string]: "var(--critical)" } : undefined}>
                   <td>
                     <span className="mono" style={{ fontWeight: 600 }}>{d.ip}</span>
                     {d.dns_name && <div className="host-sub">{d.dns_name}</div>}
                   </td>
                   <td className="nowrap">{d.site ?? "—"}</td>
                   <td>
-                    {d.signals.ad ? (
+                    {!dcKnown ? (
+                      <span className="muted" title="DC IP'lari ma'lum emas (AD ulanmagan, DC_IPS bo'sh) — domen a'zoligini aniqlab bo'lmaydi">
+                        DC ma'lum emas
+                      </span>
+                    ) : d.signals.ad ? (
                       <span className="pill" style={{ ["--c" as string]: "var(--warning)" }} title="DC bilan Kerberos/LDAP trafigi bor — domen kompyuteri, lekin nomi inventarga bog'lanmadi">
                         Domen a'zosi, nomi aniqlanmadi
                       </span>
@@ -146,6 +163,15 @@ export function Unknown() {
             </tbody>
           </table>
         </div>
+        {(rows.length > shown || total >= API_LIMIT) && (
+          <div className="pager">
+            <span>
+              {fmtInt(Math.min(shown, rows.length))} / {fmtInt(rows.length)} ko'rsatilmoqda
+              {total >= API_LIMIT && <span className="muted"> · ro'yxat {fmtInt(API_LIMIT)} ta bilan cheklangan, qidiruvdan foydalaning</span>}
+            </span>
+            {rows.length > shown && <button className="btn sm" onClick={() => setShown((n) => n + PAGE)}>Yana {PAGE} ta ko'rsatish</button>}
+          </div>
+        )}
       </div>
 
       {!!ignored?.length && (
