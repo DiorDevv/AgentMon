@@ -1,6 +1,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+# Proxy (HTTP_PROXY/HTTPS_PROXY) — Docker'ning maxsus build argumentlari: npm ham, apk ham ularni o'zi o'qiydi.
 RUN npm ci
 COPY . .
 RUN npm run build

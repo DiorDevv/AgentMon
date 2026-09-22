@@ -7,8 +7,20 @@ x-logging: &logging
     max-size: "50m"
     max-file: "5"
 
+# Internetga faqat korporativ proxy orqali chiqiladigan server: .env dagi HTTP_PROXY/HTTPS_PROXY/NO_PROXY build
+# vaqtida (pip, npm, apk) ishlatiladi. Bular Docker'ning maxsus proxy argumentlari — image ichida saqlanmaydi.
+x-proxy-args: &proxy-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${HTTP_PROXY:-}
+  https_proxy: ${HTTPS_PROXY:-}
+  no_proxy: ${NO_PROXY:-}
+
 x-backend: &backend
-  build: ./backend
+  build:
+    context: ./backend
+    args: *proxy-args
   image: agentmon-backend:latest
   env_file: .env
   volumes:
@@ -111,7 +123,9 @@ services:
       start_period: 30s
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      args: *proxy-args
     image: agentmon-web:latest
     restart: unless-stopped
     logging: *logging

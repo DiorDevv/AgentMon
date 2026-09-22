@@ -72,6 +72,12 @@ Unumdorlik: ingest bitta yadroda sekundiga ~250 ming hodisani qayta ishlaydi. 40
 
 ## O'rnatish (Ubuntu + Docker)
 
+**Bitta skript bilan (bo'sh Ubuntu VM, internet faqat proxy orqali):** `sudo bash deploy/setup-vm.sh` —
+proxy, Docker, kod, `.env` (savol-javob), build, firewall va tekshiruvni o'zi bajaradi. Batafsil:
+[`docs/ISHGA-TUSHIRISH.md`](docs/ISHGA-TUSHIRISH.md) → "Tezkor yo'l".
+
+Qo'lda:
+
 ```bash
 cp .env.example .env
 # .env ni to'ldiring: parollar, AD, Cortex, KSC, NSEL_EXPORTERS (FTD IP'lari), WEB_SECRET (openssl rand -hex 32)
