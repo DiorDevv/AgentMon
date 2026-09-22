@@ -23,6 +23,7 @@ services:
     environment:
       LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms2g -Xmx2g}
       REDIS_KEY: ${REDIS_KEY:-nsel}
+      NSEL_WORKERS: ${NSEL_WORKERS:-4}          # NetFlow dekoder oqimlari (CPU yadrolari soniga qarab)
     volumes:
       - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro

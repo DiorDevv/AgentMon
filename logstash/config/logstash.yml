@@ -1,5 +1,5 @@
-http.host: "0.0.0.0"
+api.http.host: "0.0.0.0"
 xpack.monitoring.enabled: false
 pipeline.ecs_compatibility: disabled
-pipeline.workers: 4
 pipeline.batch.size: 1000
+pipeline.workers: ${NSEL_WORKERS:4}

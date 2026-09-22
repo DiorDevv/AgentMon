@@ -52,7 +52,9 @@ docker compose exec logstash sh -c "grep Udp: /proc/net/snmp"
 
 Ikkinchi qatordagi `RcvbufErrors` ustuni **o'sib borsa**, paketlar yo'qolyapti. Yechimlar (tartib bilan):
 
-1. `.env` da `LS_JAVA_OPTS=-Xms2g -Xmx2g` qiling (RAM yetarli bo'lsa).
+1. `.env` da `NSEL_WORKERS` ni server CPU yadrolari soniga tenglang va `LS_JAVA_OPTS=-Xms2g -Xmx2g` qiling.
+   O'lchangan sig'im (yo'qotishsiz): 4 worker ≈ 10–11 ming yozuv/s, 8 worker ≈ 22 ming yozuv/s.
+   Qisqa to'lqinlar (masalan, ertalab hamma kompyuter yoqilganda) navbatga olinadi va yo'qolmaydi.
 2. FTD'da `teardown` hodisalarini o'chiring. Ular hajmning ~40% ini tashkil qiladi, lekin AgentMon uchun
    `flow-create` va `flow-update` yetarli. `event-type all` qatori o'rniga:
    ```

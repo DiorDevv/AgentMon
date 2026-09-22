@@ -44,7 +44,7 @@ Boshlashdan oldin quyidagilarni yig'ing. Qavs ichida qaysi qadamda kerak bo'lish
 
 **Server:**
 - [ ] Ubuntu 22.04 yoki 24.04 server, virtual mashina bo'lishi mumkin (1-qadam)
-  - CPU: 4 vCPU
+  - CPU: **8 vCPU** (NetFlow dekoderi CPU'ga bog'liq, pastdagi sig'im jadvaliga qarang)
   - RAM: 12–16 GB (Logstash ~2 GB, PostgreSQL, engine)
   - Disk: 100 GB
 - [ ] Serverning statik IP manzili, masalan `172.25.50.10`. Bu hujjatda **`<SERVER_IP>`** deb yoziladi.
@@ -636,6 +636,7 @@ docker compose ps && curl -s http://localhost:8088/api/health
 | "flow-update kelmayapti" | `refresh-interval` sozlanmagan | FlexConfig'ga `flow-export active refresh-interval 5` qo'shing, Deploy qiling |
 | Oqim bor, lekin "Kuzatilayotgan IP" 0 | Subnetlar noto'g'ri | Tizim holati → Foydalanuvchi subnetlari. `USER_SUBNETS` ni tekshiring |
 | Redis navbati doimiy o'syapti | Engine ulgurmayapti | `docker compose logs engine`. Serverda CPU va RAM yetarli ekanini tekshiring |
+| Redis navbati 0, lekin Tizim holati → Oqim sekundiga ~10–11 ming atrofida "qotib" qolgan | Logstash sig'imi chegarasida | `.env` da `NSEL_WORKERS` ni CPU yadrolari soniga tenglashtiring (8 worker ≈ 22 ming/s) |
 | Ba'zi kompyuterlar "tasodifiy" oflayn yoki jim ko'rinadi | UDP paketlar yo'qolyapti (Logstash ulgurmayapti) | `docker compose exec logstash sh -c "grep Udp: /proc/net/snmp"`: `RcvbufErrors` o'sib borsa, `deploy/ftd-netflow.md` → "Yuklama katta bo'lsa" |
 
 ### Active Directory
