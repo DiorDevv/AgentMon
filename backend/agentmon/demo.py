@@ -135,6 +135,8 @@ async def seed(n: int, force: bool) -> None:
     def put(ip: str, site: str, alive_since: int, last: int, groups: dict[str, int]) -> None:
         st.presence[ip] = Presence(site, now - 30 * 86400, alive_since, last)
         st.dirty_presence.add(ip)
+        if "ad" in groups:
+            groups = {**groups, "ad-auth": groups["ad"]}   # demo DC trafigi — Kerberos (88)
         for g, t in groups.items():
             st.last[(ip, g)] = t
             st.dirty_signal.add((ip, g))

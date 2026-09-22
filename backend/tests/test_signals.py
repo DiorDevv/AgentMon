@@ -120,3 +120,33 @@ def test_prune_removes_old_entries():
     assert st.prune(before=1000) == 1
     assert "1.1.1.1" not in st.presence and ("1.1.1.1", "ksc") not in st.last
     assert "2.2.2.2" in st.presence
+
+
+def test_exporter_whitelist_and_tracking():
+    st = SignalStore(600, frozenset({"172.25.0.1", "172.25.0.2"}))
+    c = clf()
+    ok = orjson.dumps({"src": "10.10.1.5", "dst": "172.25.44.50", "dport": 8888, "ev": 1, "ts": 1000, "exp": "172.25.0.1"})
+    later = orjson.dumps({"src": "10.10.1.5", "dst": "8.8.8.8", "dport": 443, "ev": 1, "ts": 1010, "exp": "172.25.0.2"})
+    spoofed = orjson.dumps({"src": "10.10.1.9", "dst": "172.25.44.50", "dport": 8888, "ev": 1, "ts": 1020,
+                            "exp": "10.10.1.66"})
+    for r in (ok, later, spoofed):
+        st.process_raw(r, c, 2000)
+    assert st.stats.rejected == 1 and "10.10.1.9" not in st.presence       # soxta eksporter e'tiborsiz
+    assert st.presence["10.10.1.5"].exporter == "172.25.0.2"               # eng yangi hodisa eksporteri
+    assert st.stats.exporters["172.25.0.1"].last_rx == 1000
+    assert st.stats.exporters["172.25.0.2"].received == 1
+
+
+def test_no_whitelist_accepts_any_exporter():
+    st = SignalStore(600)
+    st.process_raw(raw("10.10.1.5", "172.25.44.50", 8888), clf(), 2000)
+    assert st.stats.rejected == 0 and "10.10.1.5" in st.presence
+
+
+def test_dc_auth_ports_recorded_separately():
+    st = SignalStore(600)
+    c = clf()
+    st.process_raw(raw("10.10.1.5", "172.25.10.10", 445, ts=1000), c, 2000)
+    assert st.last.get(("10.10.1.5", "ad")) == 1000 and ("10.10.1.5", "ad-auth") not in st.last
+    st.process_raw(raw("10.10.1.5", "172.25.10.10", 88, ts=1100), c, 2000)
+    assert st.last[("10.10.1.5", "ad-auth")] == 1100 and st.last[("10.10.1.5", "ad")] == 1100

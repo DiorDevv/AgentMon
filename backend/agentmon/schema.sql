@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS console_endpoint (
     synced_at    timestamptz NOT NULL,
     PRIMARY KEY (product, name)
 );
+CREATE INDEX IF NOT EXISTS console_endpoint_ips_idx ON console_endpoint USING gin (ips);
 
 -- AD-integrated DNS A-yozuvlari (IP -> host moslash uchun).
 CREATE TABLE IF NOT EXISTS dns_record (
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS ip_presence (
     alive_since timestamptz NOT NULL,
     last_seen   timestamptz NOT NULL
 );
+ALTER TABLE ip_presence ADD COLUMN IF NOT EXISTS exporter text;   -- IP oxirgi marta qaysi FTD orqali ko'ringan
 
 CREATE TABLE IF NOT EXISTS net_signal (
     ip        inet NOT NULL,
@@ -115,7 +117,7 @@ CREATE INDEX IF NOT EXISTS hsh_host_idx ON host_state_history (host_id, started_
 
 CREATE TABLE IF NOT EXISTS incident (
     id         bigserial PRIMARY KEY,
-    kind       text NOT NULL,             -- mass_outage | collector_stale
+    kind       text NOT NULL,             -- mass_outage | collector_stale | exporter_stale
     product    text,
     started_at timestamptz NOT NULL,
     ended_at   timestamptz,
@@ -143,3 +145,23 @@ CREATE TABLE IF NOT EXISTS ip_ignore (
     created_by text,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Muvaffaqiyatsiz login urinishlari (cheklash uchun; 1 kundan eskilari o'chiriladi).
+CREATE TABLE IF NOT EXISTS login_failure (
+    ts       timestamptz NOT NULL DEFAULT now(),
+    ip       text NOT NULL,
+    username text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_failure_ip_idx ON login_failure (ip, ts);
+
+-- Audit jurnali: kim, qachon, qayerdan, nimani o'zgartirdi (istisno, IP yashirish, kirish).
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       bigserial PRIMARY KEY,
+    ts       timestamptz NOT NULL DEFAULT now(),
+    username text NOT NULL,
+    ip       text,
+    action   text NOT NULL,
+    target   text,
+    details  jsonb NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC);

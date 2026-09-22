@@ -5,7 +5,7 @@ from agentmon.engine.identity import Candidate, resolve, verify
 from agentmon.engine.inventory import cortex, ksc
 from agentmon.engine.inventory.ad import filetime
 from agentmon.engine.inventory.adns import build_a_record, parse_a_record
-from agentmon.model import ConsoleRecord, dedupe_latest, norm_host
+from agentmon.model import ConsoleRecord, assign_keys, dedupe_latest, netbios_key, norm_host
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
@@ -78,6 +78,45 @@ def test_dedupe_keeps_latest():
     assert [r.version for r in dedupe_latest([a, b])] == ["new"]
 
 
+def test_netbios_key():
+    assert netbios_key("ACCOUNTING-LAPTOP-01.corp.local") == "accounting-lapt"
+    assert netbios_key("CORP\\PC-0412$") == "pc-0412"
+    assert netbios_key(None) is None
+
+
+def test_assign_keys_truncates_to_netbios():
+    out = assign_keys([rec("cortex", "accounting-laptop-01"), rec("cortex", "pc-0412")])
+    assert sorted(r.name for r in out) == ["accounting-lapt", "pc-0412"]
+    assert {r.display_name for r in out} == {"accounting-laptop-01", "pc-0412"}   # ko'rinadigan nom to'liq qoladi
+
+
+def test_assign_keys_merges_short_and_full_name_of_same_machine():
+    old = rec("ksc", "accounting-lapt", last_seen=NOW - timedelta(days=5), version="old")
+    new = rec("ksc", "accounting-laptop-01", last_seen=NOW, version="new")
+    out = assign_keys([old, new])
+    assert [(r.name, r.version) for r in out] == [("accounting-lapt", "new")]
+
+
+def test_assign_keys_keeps_colliding_long_names_apart():
+    """Domensiz qurilmalar (masalan, macOS): 15 belgisi bir xil, lekin boshqa-boshqa kompyuterlar."""
+    out = assign_keys([rec("cortex", "design-macbook-pro-1"), rec("cortex", "design-macbook-pro-2")])
+    assert sorted(r.name for r in out) == ["design-macbook-pro-1", "design-macbook-pro-2"]
+
+
+def test_long_hostname_joins_across_sources():
+    """AD/KSC NetBIOS nomi (15 belgi) va Cortex to'liq nomi bitta hostga birlashadi."""
+    ad = assign_keys([ConsoleRecord("ad", "accounting-lapt", "accounting-laptop-01", True,
+                                    details={"enabled": True, "stale": False})])
+    ks = assign_keys([ksc.to_record({"KLHST_WKS_WINHOSTNAME": "ACCOUNTING-LAPT", "KLHST_WKS_STATUS": 0x1C,
+                                     "KLHST_WKS_RTP_STATE": 4}, NOW, timedelta(hours=72))])
+    cx = assign_keys([cortex.to_record({"endpoint_name": "ACCOUNTING-LAPTOP-01", "endpoint_status": "CONNECTED"})])
+    consoles = {p: {r.name: r for r in recs} for p, recs in (("ad", ad), ("ksc", ks), ("cortex", cx))}
+    hosts = build_hosts(consoles, include_servers=False)
+    assert list(hosts) == ["accounting-lapt"]
+    assert hosts["accounting-lapt"].sources == ["ad", "cortex", "ksc"]
+    assert hosts["accounting-lapt"].display_name == "ACCOUNTING-LAPTOP-01"
+
+
 def test_build_hosts_rules():
     consoles = {
         "ad": {
@@ -131,11 +170,74 @@ def test_identity_keeps_multiple_current_agent_ips():
     assert set(res) == {"10.0.0.5", "10.0.1.5"}
 
 
-def test_verify_drops_old_dns_without_dc_traffic():
+def _verify(res, sessions, signals):
+    return verify(res, sessions.get, lambda ip, grp: signals.get((ip, grp)))
+
+
+def test_verify_requires_in_session_dc_traffic_for_pre_session_dns():
     now = 1_000_000
     res = resolve([Candidate("10.0.0.5", "pc-a", "dns", now - 5 * 86400),
                    Candidate("10.0.0.6", "pc-b", "dns", now - 5 * 86400),
-                   Candidate("10.0.0.7", "pc-c", "dns", now - 3600),
-                   Candidate("10.0.0.8", "pc-d", "cortex", now - 5 * 86400)], now, 14 * 86400)
-    ok = verify(res, now, 2 * 86400, has_dc_traffic=lambda ip: ip == "10.0.0.6")
-    assert set(ok) == {"10.0.0.6", "10.0.0.7", "10.0.0.8"}
+                   Candidate("10.0.0.7", "pc-c", "dns", now - 600),         # seans ichida ro'yxatdan o'tgan
+                   Candidate("10.0.0.9", "pc-e", "dns", None)], now, 14 * 86400)
+    sessions = {ip: now - 3600 for ip in ("10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.9")}
+    signals = {("10.0.0.6", "ad-auth"): now - 60,
+               ("10.0.0.9", "ad-auth"): now - 2 * 86400}                        # DC trafigi — oldingi seansda
+    assert set(_verify(res, sessions, signals)) == {"10.0.0.6", "10.0.0.7"}
+
+
+def test_verify_dns_from_yesterday_is_not_trusted_for_new_device():
+    """Kecha pc-a shu IP'ni olgan (DNS yangi), bugun DHCP uni domensiz qurilmaga bergan."""
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "pc-a", "dns", now - 20 * 3600)], now, 14 * 86400)
+    assert _verify(res, {"10.0.0.5": now - 3600}, {("10.0.0.5", "ad-auth"): now - 19 * 3600}) == {}
+
+
+def test_verify_dhcp_reuse_drops_stale_agent_evidence():
+    """Laptop A kecha Cortex'ga shu IP bilan xabar bergan; bugun IP'ni agentsiz, domensiz B olgan."""
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "laptop-a", "cortex", now - 16 * 3600)], now, 14 * 86400)
+    assert _verify(res, {"10.0.0.5": now - 3600}, {}) == {}
+
+
+def test_verify_keeps_stale_agent_evidence_when_corroborated_in_session():
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "pc-a", "cortex", now - 16 * 3600),
+                   Candidate("10.0.0.6", "pc-b", "ksc", now - 16 * 3600)], now, 14 * 86400)
+    sessions = {"10.0.0.5": now - 3600, "10.0.0.6": now - 3600}
+    signals = {("10.0.0.5", "ad-auth"): now - 3000,     # domen a'zosi: agent to'xtagan bo'lsa ham IP unga tegishli
+               ("10.0.0.6", "si"): now - 60}            # SI trafigi agent dalilini tasdiqlamaydi
+    assert set(_verify(res, sessions, signals)) == {"10.0.0.5"}
+
+
+def test_verify_continuous_session_keeps_agent_evidence():
+    """Kompyuter bir hafta uzluksiz yoniq, agent 3 kun oldin to'xtagan: IP boshqaga o'tmagan — moslash qoladi."""
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "pc-a", "cortex", now - 3 * 86400)], now, 14 * 86400)
+    assert set(_verify(res, {"10.0.0.5": now - 7 * 86400}, {})) == {"10.0.0.5"}
+
+
+def test_verify_ignores_inactive_ips():
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "pc-a", "dns", None)], now, 14 * 86400)
+    assert set(_verify(res, {}, {})) == {"10.0.0.5"}
+
+
+def test_ad_computer_uses_samaccountname_as_key(monkeypatch):
+    from agentmon.config import Settings
+    from agentmon.engine.inventory.ad import ADClient
+    entry = {"cn": [b"ACCOUNTING-LAPT"], "sAMAccountName": [b"ACCOUNTING-LAPT$"],
+             "dNSHostName": [b"accounting-laptop-01.corp.local"], "userAccountControl": [b"4096"],
+             "lastLogonTimestamp": [b"134000000000000000"]}
+    client = ADClient(Settings(_env_file=None, ad_base_dn="DC=corp,DC=local"))
+    monkeypatch.setattr(client, "_paged", lambda *a, **kw: iter([("CN=ACCOUNTING-LAPT,DC=corp,DC=local", entry)]))
+    recs, dcs = client._computers(None, NOW)
+    assert recs[0].name == "accounting-lapt" and recs[0].display_name == "accounting-laptop-01"
+    assert recs[0].fqdn == "accounting-laptop-01.corp.local" and dcs == []
+
+
+def test_verify_smb_to_dc_does_not_prove_domain_membership():
+    """Domensiz qurilma NTLM bilan DC'dagi papkaga ulangan (445) — bu eski DNS dalilini tasdiqlamaydi."""
+    now = 1_000_000
+    res = resolve([Candidate("10.0.0.5", "pc-a", "dns", now - 5 * 86400)], now, 14 * 86400)
+    assert _verify(res, {"10.0.0.5": now - 3600}, {("10.0.0.5", "ad"): now - 60}) == {}

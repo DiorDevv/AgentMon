@@ -21,7 +21,7 @@ Obyektni **Devices → FlexConfig** policy'ga qo'shing, uni barcha FTD'larga (ma
 
 | Buyruq | Nima uchun kerak |
 |---|---|
-| `flow-export destination` | NSEL qayerga yuborilishi. Interfeys AgentMon serveriga yo'l bo'lgan interfeys bo'lishi kerak. |
+| `flow-export destination` | NSEL qayerga yuborilishi. Interfeys AgentMon serveriga yo'l bo'lgan interfeys bo'lishi kerak. **Shu interfeysning IP'si `.env` dagi `NSEL_EXPORTERS` ga yoziladi** — boshqa manzildan kelgan NetFlow qabul qilinmaydi. |
 | `template timeout-rate 1` | Template har daqiqada qayta yuboriladi, shuning uchun Logstash qayta ishga tushganda ham tez tiklanadi. |
 | `active refresh-interval 5` | **Majburiy.** Uzoq ochiq turadigan ulanishlar (KSC 13000, Cortex Broker) uchun har 5 daqiqada `flow-update` yuboriladi. Busiz ishlab turgan agent ham "jim" ko'rinadi. |
 | `event-type all` | created / teardown / denied / update hodisalarining barchasi. |

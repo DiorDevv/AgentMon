@@ -6,6 +6,7 @@ import { ago, fmtInt } from "../format";
 import { useApi } from "../hooks";
 import { collectorLive } from "../status";
 import type { Summary } from "../types";
+import { ROLE, ROLE_LABEL } from "../session";
 
 function currentTheme(): "light" | "dark" {
   const t = document.documentElement.dataset.theme;
@@ -88,7 +89,7 @@ export function Layout({ user, onLogout, children }: { user: string; onLogout: (
             <span className="avatar">{user.slice(0, 2)}</span>
             <div>
               <div className="name">{user}</div>
-              <div style={{ fontSize: 11.5, color: "var(--side-muted)" }}>Administrator</div>
+              <div style={{ fontSize: 11.5, color: "var(--side-muted)" }}>{ROLE_LABEL[ROLE]}</div>
             </div>
             {user !== "anonymous" && (
               <button onClick={logout} title="Chiqish" aria-label="Chiqish"><LogOut size={16} /></button>

@@ -2,7 +2,7 @@
 
 Bu hujjatda loyihaning butun konteksti saqlangan: vazifa qanday qo'yilgan, qanday ma'lumotlar berilgan,
 qanday tahlil qilingan va nima uchun aynan shunday qarorlar qabul qilingan.
-Oxirgi yangilanish: 2026-09-21.
+Oxirgi yangilanish: 2026-09-22.
 
 ---
 
@@ -89,6 +89,11 @@ Muammoli kompyuterlar = [Tarmoqda tirik kompyuterlar] − [Agenti serverga muroj
 | 5 | FTD `refresh-interval` majburiy | Busiz ishlab turgan agentlar ham "jim" ko'rinadi |
 | 6 | Hisob-kitob **hodisalar vaqti** (watermark) bo'yicha | Engine orqada qolsa ham hostlar "jim" bo'lib ketmaydi |
 | 7 | Kirish AD guruhi orqali (LDAP) + favqulodda lokal admin | Xavfsizlik vositasi ochiq bo'lmasligi kerak |
+| 8 | Hostlarni birlashtirish kaliti — **NetBIOS nomi** (15 belgi, `sAMAccountName`) | AD/KSC qisqa nomni, Cortex/DNS to'liq hostname'ni beradi. Domenda aynan NetBIOS nomi noyob. To'qnashuvda (domensiz qurilmalar) to'liq nom qoldiriladi |
+| 9 | LDAP login: **avval qidirish (servis hisobi), keyin topilgan DN bilan bind** | Ruxsat tekshirilgan hisob va parol tekshirilgan hisob doim bitta (ishonchli domendagi hamnom huquq ololmaydi) |
+| 10 | Ikki rol: kuzatuvchi / administrator (`WEB_ADMIN_GROUP`) + audit jurnali | Xodim o'z qurilmasini "istisno" qilib yashira olmasligi, har o'zgarish izlanishi uchun |
+| 11 | HTTPS web konteyner ichida (sertifikat yo'q bo'lsa o'z-o'zidan imzolangan) | AD parollari hech qachon ochiq kanalda yuborilmasligi uchun — "keyin sozlanadi" qadamiga qoldirilmaydi |
+| 12 | NetFlow faqat `NSEL_EXPORTERS` dan (Logstash + engine) va `DOCKER-USER` firewall | UDP autentifikatsiyasiz: soxta NetFlow bilan agentsiz kompyuterni "OK" qilib ko'rsatish mumkin. Docker portlari ufw'ni chetlab o'tadi |
 
 **Unumdorlik (o'lchangan):** ingest bitta yadroda sekundiga ~256 ming hodisa (kutilgan yuklama 5–10 ming). 4000 hostni baholash ~0.5 soniya.
 
@@ -113,7 +118,11 @@ KSC 45 daqiqa, SI 1 soat, KSC bazalari 72 soat, debounce 2 marta, ommaviy uzilis
 **IP moslash qoidalari (DHCP xavfiga qarshi):**
 1. Eng yangi dalil g'olib. Vaqt teng bo'lsa, agent dalili DNS'dan ustun.
 2. Agent hostning yangi IP'sini xabar qilgan bo'lsa, o'sha hostning boshqa IP'lardagi eski dalillari bekor qilinadi.
-3. Eski (2 kundan ortiq) yoki statik DNS dalili bilan moslangan **faol** IP DC trafigini ko'rsatishi shart, aks holda u noma'lum qurilma deb hisoblanadi.
+3. **Faol** IP'ning dalili (DNS yoki agent) shu IP'ning **joriy faollik seansidan oldin** olingan bo'lsa, u oldingi egasiga
+   tegishli bo'lishi mumkin (kechqurun laptop ketdi, ertalab DHCP IP'ni boshqa qurilmaga berdi). Bunday dalil joriy seansdagi
+   trafik bilan tasdiqlanishi shart: DNS uchun — DC bilan **Kerberos/LDAP** (88/389; 445 emas — domensiz qurilma ham NTLM
+   bilan ulana oladi), agent uchun — shu yoki Cortex/KSC serveriga trafik. Aks holda IP noma'lum qurilma sifatida
+   ko'rsatiladi ("oldin: <kompyuter>" ishorasi bilan) va oldingi egasi noto'g'ri ayblanmaydi.
 
 ---
 
@@ -140,9 +149,30 @@ KSC 45 daqiqa, SI 1 soat, KSC bazalari 72 soat, debounce 2 marta, ommaviy uzilis
 
 ---
 
+**Uchinchi bosqich: ikkinchi to'liq audit (2026-09-22).** Topilgan va tuzatilgan muammolar:
+- **IP moslash (DHCP):** agent xabar bergan eski IP tekshirilmas edi — kecha ketgan laptop "to'xtatilgan" deb ayblanib,
+  bugun shu IP'ni olgan begona qurilma yashirinardi. Kechagi DNS yozuvida ham xuddi shu teshik bor edi. 3-qoida seansga
+  asoslangan qilib qayta yozildi; domen a'zoligi faqat Kerberos/LDAP trafigi bilan isbotlanadi.
+- **Nomlar:** 15 belgidan uzun hostname'li kompyuter ikkita host bo'lib ketardi (AD/KSC NetBIOS, Cortex to'liq nom). ADR 8.
+- **Tarmoq:** Docker portlari ufw'ni chetlab o'tardi, web HTTP'da edi (AD parollari ochiq), NetFlow porti hammaga ochiq
+  va soxtalashtirish mumkin edi. ADR 11–12, `deploy/docker-firewall.sh`.
+- **Login:** boshqa domendagi hamnom huquqi (ADR 9); urinishlarni cheklash nginx IP'si bo'yicha ishlardi (istalgan odam
+  adminni bloklay olardi) — endi haqiqiy mijoz IP'si, PostgreSQL'da, faqat xato urinishlar.
+- **Rollar va audit** (ADR 10).
+- **Ommaviy uzilish** cheksiz "OK"da ushlab turardi va kechasi yoki holat o'zgarganda noto'g'ri yopilardi. Endi bazaviy
+  hostlar insidentda saqlanadi, `MASS_OUTAGE_MAX_HOLD` (4 soat) dan keyin eskalatsiya.
+- **Har bir FTD alohida kuzatiladi:** keskin jimlik — insident, filial kechasi yopilishi — insident emas.
+- **Redis bufer** o'lchandi: ~105 bayt/hodisa, 1 GB ≈ 10 ming/s da 17 daqiqa (ADR 2'dagi "yo'qolmaydi" faqat shu oraliqda
+  to'g'ri). `REDIS_MAXMEMORY` sozlanadi, bandlik UI'da.
+- **Sirlar va TLS:** namunadagi parol/kalit olib tashlandi va rad etiladi; `AD_CA_FILE`, `KSC_CA_FILE`.
+- **Barqarorlik:** engine watchdog (event loop osilsa — restart), advisory lock yo'qolsa to'xtash, healthcheck'lar,
+  log rotatsiyasi, API keshi worker'lar orasida sinxron, oflayn/tekshirilmoqda tarixi 30 kun.
+- **Testlar:** 110 ta (DB testlari ham), `tools/test.sh` (faqat Docker), GitHub Actions CI (Logstash konfiguratsiyasi ham).
+
 ## 7. Hali tasdiqlanmagan va keyingi qadamlar
 
-1. **`docker compose up`** hali haqiqiy serverda ishga tushirilmagan (ishlab chiqish kompyuterida Docker'ga ruxsat yo'q edi).
+1. **`docker compose up`** ishlab chiqish kompyuterida alohida muhitda to'liq sinaldi; haqiqiy serverda hali ishga tushirilmagan.
+   `deploy/docker-firewall.sh` faqat izolyatsiyalangan konteynerda sinalgan — serverda `--show` bilan tekshiring.
 2. **FTD sozlamasi:** `deploy/ftd-netflow.md` bo'yicha, `refresh-interval` bilan.
 3. **Haqiqiy AD, Cortex va KSC'ga ulanish.** Ayniqsa KSC maydonlari (`KLHST_WKS_STATUS` bitlari, `KLHST_WKS_LAST_UPDATE`) 2–3 ta holati ma'lum kompyuterda tasdiqlanishi kerak.
 4. **Pilot:** 1 ta VLAN, 20–30 ta holati ma'lum kompyuter. `THRESH_*` chegaralarini kalibrlash. SearchInform agentlarining 8090 portga murojaat davriyligini tekshirish.

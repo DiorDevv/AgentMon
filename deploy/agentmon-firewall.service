@@ -1,0 +1,17 @@
+# AgentMon: DOCKER-USER firewall qoidalarini har yuklanishda (Docker ishga tushgandan keyin) qo'llaydi.
+# O'rnatish (loyiha /opt/agentmon da bo'lsa; boshqa joyda bo'lsa yo'lni o'zgartiring):
+#   sudo cp deploy/agentmon-firewall.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agentmon-firewall
+[Unit]
+Description=AgentMon Docker port firewall (DOCKER-USER)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/agentmon/deploy/docker-firewall.sh
+ExecStop=/opt/agentmon/deploy/docker-firewall.sh --remove
+
+[Install]
+WantedBy=multi-user.target

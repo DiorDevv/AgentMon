@@ -1,4 +1,4 @@
-import { Cpu, Database, Globe, Layers, MemoryStick, Router, Settings2, ShieldAlert } from "lucide-react";
+import { Cpu, Database, Globe, History, Layers, MemoryStick, Router, Settings2, ShieldAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { Empty, ProductLabel, Skeleton } from "../components/ui";
 import { ago, fmtDate, fmtInt } from "../format";
@@ -25,7 +25,32 @@ interface SystemData {
   };
 }
 
+interface AuditEntry {
+  ts: string;
+  username: string;
+  ip: string | null;
+  action: string;
+  target: string | null;
+  details: { note?: string | null; role?: string };
+}
+
+const AUDIT_ACTIONS: Record<string, string> = {
+  login: "Tizimga kirdi",
+  "host.exclude": "Hostni istisno qildi",
+  "host.include": "Hostni monitoringga qaytardi",
+  "ip.ignore": "IP'ni ma'lum qurilma deb belgiladi",
+  "ip.unignore": "IP belgisini olib tashladi",
+};
+
 type Health = "ok" | "warn" | "bad" | "idle";
+type ExporterState = "ok" | "quiet" | "stale" | "missing";
+const EXPORTER_HEALTH: Record<ExporterState, Health> = { ok: "ok", quiet: "idle", stale: "bad", missing: "bad" };
+const EXPORTER_LABEL: Record<ExporterState, string> = {
+  ok: "Kelmoqda",
+  quiet: "Jim (faol kompyuter yo'q edi)",
+  stale: "To'satdan to'xtadi",
+  missing: "Hech qachon kelmagan",
+};
 const HEALTH_COLOR: Record<Health, string> = { ok: "var(--good)", warn: "var(--warning)", bad: "var(--critical)", idle: "var(--neutral)" };
 const EVENT_NAMES: Record<string, string> = { "0": "NetFlow", "1": "Yaratildi", "2": "Yopildi", "3": "Rad etildi", "5": "Yangilanish" };
 const SOURCE_NAMES: Record<string, string> = { ad: "Active Directory (LDAP + DNS)", cortex: "Cortex XDR API", ksc: "Kaspersky Security Center" };
@@ -56,6 +81,7 @@ function Stage({ icon: I, name, sub, h }: { icon: typeof Cpu; name: string; sub:
 
 export function System() {
   const { data } = useApi<SystemData>("/api/system", 30000);
+  const { data: audit } = useApi<AuditEntry[]>("/api/audit?limit=100", 60000);
   if (!data) return <div className="grid"><Skeleton h={160} /><Skeleton h={300} /></div>;
   const col = data.status.collector;
   const eng = data.status.engine;
@@ -63,7 +89,9 @@ export function System() {
 
   const live = collectorLive(col);
   const colH: Health = !col ? "idle" : !live ? "bad" : col.update_events_seen ? "ok" : "warn";
-  const queueH: Health = !col || col.queue === null ? "idle" : col.queue < 50000 ? "ok" : "warn";
+  const buf = col?.buffer_pct ?? null;
+  const queueH: Health = !col || col.queue === null ? "idle" : (buf ?? 0) >= 80 ? "bad" : col.queue < 50000 && (buf ?? 0) < 50 ? "ok" : "warn";
+  const exporters = Object.entries(col?.exporters ?? {});
   const engH: Health = !eng ? "idle" : engineFresh(eng) ? "ok" : "bad";
   const srcH: Health = !data.sources.length ? "idle" : data.sources.every((s) => s.last_success && !s.last_error) ? "ok" : "warn";
   // Zanjirning umumiy holati — eng yomon bosqich bo'yicha.
@@ -93,12 +121,38 @@ export function System() {
         <div className="pipeline">
           <Stage icon={Router} name="Cisco FTD" h={colH === "idle" ? "idle" : live ? "ok" : "bad"} sub={col?.update_events_seen ? "NSEL + flow-update" : "NSEL"} />
           <Stage icon={Layers} name="Logstash" h={colH} sub={col ? `${fmtInt(Math.round(col.eps))} hodisa/s` : "—"} />
-          <Stage icon={MemoryStick} name="Redis" h={queueH} sub={col?.queue === null || !col ? "—" : `navbat: ${fmtInt(col.queue)}`} />
+          <Stage icon={MemoryStick} name="Redis" h={queueH} sub={col?.queue === null || !col ? "—" : `navbat: ${fmtInt(col.queue)}${buf !== null ? ` · bufer ${buf}%` : ""}`} />
           <Stage icon={Cpu} name="Engine" h={engH} sub={eng ? `${eng.eval_ms} ms · ${ago(eng.last_eval)}` : "—"} />
           <Stage icon={Database} name="PostgreSQL" h={eng ? "ok" : "idle"} sub={eng ? `${fmtInt(eng.hosts)} host` : "—"} />
           <Stage icon={Globe} name="Web" h="ok" sub="shu sahifa" />
         </div>
       </div>
+
+      {!!exporters.length && (
+        <div className="card section">
+          <div className="card-head">
+            <div><h2>NetFlow eksporterlari (FTD)</h2><div className="sub">Har bir FTD'dan ma'lumot kelayaptimi</div></div>
+            <Router size={18} className="muted" />
+          </div>
+          <div className="table-wrap">
+            <table className="tbl">
+              <thead><tr><th>FTD IP</th><th>Holat</th><th>Oxirgi hodisa</th><th className="r">Hodisalar</th></tr></thead>
+              <tbody>
+                {exporters.map(([ip, e]) => (
+                  <tr key={ip}>
+                    <td className="mono">{ip}</td>
+                    <td>
+                      <HealthPill h={EXPORTER_HEALTH[e.state]}>{EXPORTER_LABEL[e.state]}</HealthPill>
+                    </td>
+                    <td className="ink-2">{e.last_rx ? <>{fmtDate(e.last_rx)} <span className="muted">({ago(e.last_rx)})</span></> : "—"}</td>
+                    <td className="r num">{fmtInt(e.received)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="grid g-2 section">
         <div className="card">
@@ -112,6 +166,8 @@ export function System() {
                 <dd>{col.update_events_seen ? <span className="good-text">kelmoqda</span> : <span className="bad-text">kelmayapti — FTD'da refresh-interval sozlang</span>}</dd>
                 <dt>Kuzatilayotgan IP</dt><dd className="num">{fmtInt(col.tracked_ips)}</dd>
                 <dt>Qabul qilingan</dt><dd className="num">{fmtInt(col.received)} <span className="muted">({fmtInt(col.accepted)} foydalanuvchi trafigi, {fmtInt(col.malformed)} buzuq)</span></dd>
+                {!!col.rejected && (<><dt>Rad etilgan</dt><dd className="num bad-text">{fmtInt(col.rejected)} <span className="muted">(NSEL_EXPORTERS ro'yxatida yo'q manzildan)</span></dd></>)}
+                {buf !== null && (<><dt>Redis bufer</dt><dd className={`num${buf >= 80 ? " bad-text" : ""}`}>{buf}% band{buf >= 80 && " — to'lsa hodisalar yo'qoladi, engine'ni tekshiring"}</dd></>)}
                 <dt>Hodisa turlari</dt>
                 <dd><div className="chips">{Object.entries(col.by_event).map(([k, v]) => <span key={k} className="pill plain" style={{ height: 22 }}>{EVENT_NAMES[k] ?? k}: <b className="num">{fmtInt(v)}</b></span>)}</div></dd>
               </dl>
@@ -179,7 +235,8 @@ export function System() {
                 <tbody>
                   {data.incidents.map((i) => (
                     <tr key={i.id}>
-                      <td><HealthPill h={i.ended_at ? "idle" : "bad"}>{i.kind === "mass_outage" ? `Ommaviy uzilish: ${PRODUCT_NAMES[i.product as Product]}` : "NetFlow kelmay qoldi"}</HealthPill></td>
+                      <td><HealthPill h={i.ended_at ? "idle" : "bad"}>{i.kind === "mass_outage" ? `Ommaviy uzilish: ${PRODUCT_NAMES[i.product as Product]}`
+                        : i.kind === "exporter_stale" ? `FTD ${i.details.exporter}: NetFlow kelmadi` : "NetFlow kelmay qoldi"}</HealthPill></td>
                       <td className="ink-2 r">{fmtDate(i.started_at)} — {i.ended_at ? fmtDate(i.ended_at) : <b className="bad-text">davom etmoqda</b>}</td>
                     </tr>
                   ))}
@@ -207,6 +264,31 @@ export function System() {
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div><h2>Audit jurnali</h2><div className="sub">Kim, qachon va qayerdan o'zgartirish kiritgan (oxirgi 100 ta)</div></div>
+          <History size={18} className="muted" />
+        </div>
+        <div className="table-wrap" style={{ maxHeight: 420, overflowY: "auto" }}>
+          <table className="tbl">
+            <thead><tr><th>Vaqt</th><th>Foydalanuvchi</th><th>Amal</th><th>Obyekt</th><th>Izoh</th><th>IP</th></tr></thead>
+            <tbody>
+              {(audit ?? []).map((a, i) => (
+                <tr key={`${a.ts}-${i}`}>
+                  <td className="ink-2 nowrap">{fmtDate(a.ts)}</td>
+                  <td>{a.username}</td>
+                  <td>{AUDIT_ACTIONS[a.action] ?? a.action}</td>
+                  <td className="mono">{a.target ?? "—"}</td>
+                  <td>{a.details.note ?? (a.details.role ? `rol: ${a.details.role}` : "")}</td>
+                  <td className="mono ink-2">{a.ip ?? "—"}</td>
+                </tr>
+              ))}
+              {audit && !audit.length && <tr><td colSpan={6}><Empty>Hali yozuv yo'q</Empty></td></tr>}
+            </tbody>
+          </table>
         </div>
       </div>
     </>

@@ -12,8 +12,11 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 import signal
+import threading
 import time
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,7 +25,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import RedisError
 
 from agentmon import db
-from agentmon.config import Settings, get_settings
+from agentmon.config import Settings, get_settings, split_csv
 from agentmon.engine.classify import Classifier
 from agentmon.engine.hosts import build_hosts
 from agentmon.engine.identity import Candidate, resolve, verify
@@ -41,8 +44,8 @@ from agentmon.engine.rules import (
     effective_state,
     evaluate,
 )
-from agentmon.engine.signals import EV_UPDATE, Presence, SignalStore, denied_group
-from agentmon.model import CONFLICT, OK, SILENCE_STATES, ConsoleRecord, dedupe_latest
+from agentmon.engine.signals import EV_UPDATE, ExporterStat, Presence, SignalStore, denied_group
+from agentmon.model import CONFLICT, OK, SILENCE_STATES, ConsoleRecord, assign_keys
 
 log = logging.getLogger("agentmon.engine")
 _IDENTITY_SENSITIVE = SILENCE_STATES | {CONFLICT}
@@ -51,10 +54,15 @@ CONSOLE_PRODUCTS = ("ad", "cortex", "ksc")
 REDIS_BATCH = 2000
 RECENT_HOST_SECONDS = 7 * 86400   # hisobotlarga kiradigan hostlar: so'nggi 7 kunda tirik bo'lganlar
 ENGINE_LOCK_ID = 7_310_001        # faqat bitta engine nusxasi ishlashi uchun (pg advisory lock)
-DNS_TRUST_AGE = 2 * 86400         # bundan eski DNS dalili DC trafigi bilan tasdiqlanishi kerak
-DC_TRAFFIC_WINDOW = 7 * 86400
+HEARTBEAT_FILE = Path(os.environ.get("AGENTMON_HEARTBEAT", "/tmp/agentmon-engine.alive"))   # docker healthcheck
+HEARTBEAT_EVERY = 5
+LOCK_CHECK_EVERY = 30
+WATCHDOG_STALL = 120              # event loop shuncha soniya javob bermasa — jarayon to'xtatiladi (Docker qayta ishga tushiradi)
 SIGNAL_RETENTION = 30 * 86400
 SUSPICIOUS_REPEATS = 3            # keskin kamaygan inventar shuncha marta takrorlansa — haqiqiy deb qabul qilinadi
+EXPORTER_ABRUPT_WINDOW = 120       # eksporter jim bo'lishidan oldingi shu oraliqda ko'rilgan hostlar sanaladi
+EXPORTER_ABRUPT_MIN = 5            # ...kamida shuncha bo'lsa — keskin jimlik (nosozlik), aks holda filial shunchaki yopilgan
+EXPORTER_FORGET = 7 * 86400        # sozlamada yo'q va shuncha vaqt jim eksporter ro'yxatdan chiqariladi
 IDENTITY_FRESH = 86400            # IP->host dalili bundan eski bo'lsa, "jimlik" xulosasiga ogohlantirish qo'shiladi
 STALE_IDENTITY_NOTE = ("Diqqat: bu IP kompyuterga 1 kundan eski dalil bilan bog'langan — "
                        "IP boshqa qurilmaga berilgan bo'lishi mumkin")
@@ -66,6 +74,19 @@ def dt(ts: int | float | None) -> datetime | None:
 
 def ts_of(d: datetime | None) -> int | None:
     return int(d.timestamp()) if d else None
+
+
+@dataclass(slots=True)
+class Outage:
+    """Ochiq ommaviy uzilish. `base` — boshlanishda OK bo'lgan hostlar: tugash shular bo'yicha o'lchanadi
+    (ushlab turish tugagach ularning holati o'zgaradi, shuning uchun "hozir OK" ro'yxatiga tayanib bo'lmaydi)."""
+    id: int
+    base: frozenset[int]
+    started: int
+    escalated: bool = False
+
+
+OUTAGE_NOTE = "ommaviy uzilish davom etmoqda — agent serveri yoki tarmoqni tekshiring"
 
 
 @dataclass(slots=True)
@@ -82,7 +103,7 @@ class Engine:
         self.s = s
         self.pool = None
         self.redis: aioredis.Redis | None = None
-        self.store = SignalStore(s.alive_window)
+        self.store = SignalStore(s.alive_window, frozenset(split_csv(s.nsel_exporters)))
         self.clf = Classifier.from_settings(s)
         self.consoles: dict[str, dict[str, ConsoleRecord]] = {p: {} for p in CONSOLE_PRODUCTS}
         self.source_ok: dict[str, int] = {}
@@ -92,8 +113,9 @@ class Engine:
         self.ip_map: dict[str, tuple[int, str, int | None, int]] = {}
         self.host_ips: dict[int, list[str]] = {}
         self.tracked: dict[tuple[int, str], Tracked] = {}
-        self.outages: dict[str, int] = {}
+        self.outages: dict[str, Outage] = {}
         self.collector_incident: int | None = None
+        self.exporter_incidents: dict[str, int] = {}
         self.last_snapshot_hour: int | None = None
         self.started = time.time()
         self.data_since: float | None = None   # uzluksiz NSEL oqimi boshlangan vaqt (isinish davri uchun)
@@ -102,6 +124,8 @@ class Engine:
         self._suspicious: dict[str, tuple[int, int]] = {}
         self._lock_conn = None
         self._eps_prev: tuple[float, int] = (time.time(), 0)
+        self._beat = time.monotonic()
+        self.exit_code = 0
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -127,7 +151,9 @@ class Engine:
             ("inventory", self._periodic(self.s.inventory_interval, self.sync_inventory)),
             ("evaluate", self._periodic(self.s.eval_interval, self.evaluate_cycle, delay=15)),
             ("maintenance", self._periodic(6 * 3600, self.maintenance, delay=300)),
+            ("heartbeat", self._heartbeat_loop()),
         )]
+        threading.Thread(target=self._watchdog, name="watchdog", daemon=True).start()
         await self.stopping.wait()
         for t in tasks:
             t.cancel()
@@ -159,12 +185,52 @@ class Engine:
                 log.exception("%s xatolik bilan tugadi", fn.__name__)
             await self._sleep(max(1.0, interval - (time.monotonic() - t0)))
 
+    # ------------------------------------------------------------------ nazorat
+    async def _heartbeat_loop(self) -> None:
+        last_lock_check = 0.0
+        while not self.stopping.is_set():
+            self._beat = time.monotonic()
+            try:
+                HEARTBEAT_FILE.touch()
+            except OSError:
+                pass
+            if self._beat - last_lock_check >= LOCK_CHECK_EVERY:
+                last_lock_check = self._beat
+                if not await self._lock_held():
+                    # PostgreSQL qayta ishga tushsa lock bilan birga ulanish ham yo'qoladi; ikkinchi engine
+                    # ishga tushib ketmasligi uchun to'xtaymiz — Docker qayta ishga tushirib, lock'ni qayta oladi.
+                    log.critical("Engine lock'i yo'qoldi (DB ulanishi uzildi) — engine to'xtatilmoqda")
+                    self.exit_code = 1
+                    self.stopping.set()
+                    return
+            await self._sleep(HEARTBEAT_EVERY)
+
+    async def _lock_held(self) -> bool:
+        try:
+            return bool(await self._lock_conn.fetchval(
+                """SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = $1
+                                  AND pid = pg_backend_pid() AND granted)""", ENGINE_LOCK_ID))
+        except Exception:  # noqa: BLE001 — ulanish uzilgan
+            return False
+
+    def _watchdog(self) -> None:
+        """Alohida thread: event loop osilib qolsa (bloklovchi kod, deadlock) jarayonni to'xtatadi."""
+        while not self.stopping.is_set():
+            time.sleep(10)
+            stalled = time.monotonic() - self._beat
+            if stalled > WATCHDOG_STALL and not self.stopping.is_set():
+                log.critical("Engine %d soniyadan beri javob bermayapti — jarayon to'xtatilmoqda", stalled)
+                logging.shutdown()
+                os._exit(70)
+
     # ------------------------------------------------------------------ load
     async def _load(self) -> None:
         p = self.pool
         presence = {
-            r["ip"]: Presence(r["site"] or "", ts_of(r["first_seen"]), ts_of(r["alive_since"]), ts_of(r["last_seen"]))
-            for r in await p.fetch("SELECT host(ip) AS ip, site, first_seen, alive_since, last_seen FROM ip_presence")
+            r["ip"]: Presence(r["site"] or "", ts_of(r["first_seen"]), ts_of(r["alive_since"]), ts_of(r["last_seen"]),
+                              r["exporter"] or "")
+            for r in await p.fetch(
+                "SELECT host(ip) AS ip, site, first_seen, alive_since, last_seen, exporter FROM ip_presence")
         }
         last = {(r["ip"], r["grp"]): ts_of(r["last_seen"])
                 for r in await p.fetch("SELECT host(ip) AS ip, grp, last_seen FROM net_signal")}
@@ -187,11 +253,20 @@ class Engine:
         for r in await p.fetch("SELECT * FROM host_state"):
             self.tracked[(r["host_id"], r["product"])] = Tracked(
                 r["state"], r["reason"], ts_of(r["since"]), r["last_known"], r["last_known_reason"])
-        for r in await p.fetch("SELECT id, kind, product FROM incident WHERE ended_at IS NULL"):
+        for r in await p.fetch("SELECT id, kind, product, started_at, details FROM incident WHERE ended_at IS NULL"):
             if r["kind"] == "mass_outage":
-                self.outages[r["product"]] = r["id"]
+                d = r["details"] or {}
+                self.outages[r["product"]] = Outage(r["id"], frozenset(d.get("base_hosts") or ()),
+                                                    ts_of(r["started_at"]), bool(d.get("escalated")))
             elif r["kind"] == "collector_stale":
                 self.collector_incident = r["id"]
+            elif r["kind"] == "exporter_stale":
+                self.exporter_incidents[(r["details"] or {}).get("exporter", "")] = r["id"]
+        # Eksporterlar holati restartdan keyin ham saqlanadi (aks holda jim FTD'ni bilib bo'lmaydi).
+        col = await p.fetchval("SELECT value FROM system_status WHERE key = 'collector'") or {}
+        for exp, v in (col.get("exporters") or {}).items():
+            last = datetime.fromisoformat(v["last_rx"]) if v.get("last_rx") else None
+            self.store.stats.exporters[exp] = ExporterStat(ts_of(last), int(v.get("received") or 0))
 
     async def _load_hosts(self) -> None:
         rows = await self.pool.fetch("SELECT id, name, excluded, cardinality(sources) > 0 AS active FROM host")
@@ -248,14 +323,15 @@ class Engine:
             async with self.pool.acquire() as c, c.transaction():
                 if pres:
                     await c.execute(
-                        """INSERT INTO ip_presence (ip, site, first_seen, alive_since, last_seen)
-                           SELECT v.ip::inet, v.site, v.fs, v.al, v.ls
-                           FROM unnest($1::text[], $2::text[], $3::timestamptz[], $4::timestamptz[], $5::timestamptz[])
-                                AS v(ip, site, fs, al, ls)
-                           ON CONFLICT (ip) DO UPDATE SET site = EXCLUDED.site,
-                               alive_since = EXCLUDED.alive_since, last_seen = EXCLUDED.last_seen""",
+                        """INSERT INTO ip_presence (ip, site, first_seen, alive_since, last_seen, exporter)
+                           SELECT v.ip::inet, v.site, v.fs, v.al, v.ls, nullif(v.exp, '')
+                           FROM unnest($1::text[], $2::text[], $3::timestamptz[], $4::timestamptz[], $5::timestamptz[],
+                                       $6::text[]) AS v(ip, site, fs, al, ls, exp)
+                           ON CONFLICT (ip) DO UPDATE SET site = EXCLUDED.site, alive_since = EXCLUDED.alive_since,
+                               last_seen = EXCLUDED.last_seen, exporter = EXCLUDED.exporter""",
                         [ip for ip, _ in pres], [p.site for _, p in pres], [dt(p.first_seen) for _, p in pres],
-                        [dt(p.alive_since) for _, p in pres], [dt(p.last_seen) for _, p in pres])
+                        [dt(p.alive_since) for _, p in pres], [dt(p.last_seen) for _, p in pres],
+                        [p.exporter for _, p in pres])
                 if sig:
                     await c.execute(
                         """INSERT INTO net_signal (ip, grp, last_seen)
@@ -275,12 +351,15 @@ class Engine:
         self._eps_prev = (now, st.received)
         try:
             queue = await self.redis.llen(self.s.redis_key)
+            mem = await self.redis.info("memory")
+            buffer_pct = round(mem["used_memory"] / mem["maxmemory"] * 100, 1) if mem.get("maxmemory") else None
         except RedisError:
-            queue = None
+            queue = buffer_pct = None
         await db.set_status(self.pool, "collector", {
             "received": st.received, "accepted": st.accepted, "malformed": st.malformed,
             "by_event": {str(k): v for k, v in st.by_event.items()},
-            "eps": round(eps, 1), "queue": queue,
+            "eps": round(eps, 1), "queue": queue, "buffer_pct": buffer_pct, "rejected": st.rejected,
+            "exporters": self._exporter_report(),
             "last_rx": dt(st.last_rx_wall).isoformat() if st.last_rx_wall else None,
             "watermark": dt(st.watermark).isoformat() if st.watermark else None,
             "stale": self._collector_stale(),
@@ -289,6 +368,46 @@ class Engine:
             "ev_update_code": EV_UPDATE,
             "tracked_ips": len(self.store.presence),
         })
+
+    # ------------------------------------------------------------------ exporters (FTD'lar)
+    def _exporter_states(self) -> dict[str, str]:
+        """Har bir eksporter: ok | quiet (jim, lekin faol host yo'q edi — filial yopilgan) | stale (keskin jimlik)
+        | missing (sozlamada bor, lekin hech qachon ma'lumot kelmagan)."""
+        st = self.store.stats
+        ref = st.watermark
+        out: dict[str, str] = {}
+        for exp, es in st.exporters.items():
+            # Hodisalar vaqti bo'yicha (watermark): engine orqada qolsa ham eksporterlar "jim" ko'rinmaydi.
+            if ref is None or es.last_rx is None or ref - es.last_rx <= self.s.exporter_stale:
+                out[exp] = "ok"
+                continue
+            since = es.last_rx - EXPORTER_ABRUPT_WINDOW
+            active = sum(1 for p in self.store.presence.values() if p.exporter == exp and p.last_seen >= since)
+            out[exp] = "stale" if active >= EXPORTER_ABRUPT_MIN else "quiet"
+        running = time.time() - self.started > max(self.s.exporter_stale, self.s.alive_window)
+        for exp in self.store.allowed_exporters:
+            if exp not in out and running:
+                out[exp] = "missing"
+        return out
+
+    def _exporter_report(self) -> dict[str, dict]:
+        st = self.store.stats
+        states = self._exporter_states()
+        return {exp: {"last_rx": dt(es.last_rx).isoformat() if (es := st.exporters.get(exp)) and es.last_rx else None,
+                      "received": es.received if es else 0, "state": state}
+                for exp, state in sorted(states.items())}
+
+    async def _update_exporter_incidents(self) -> None:
+        states = self._exporter_states()
+        for exp, state in states.items():
+            if state in ("stale", "missing") and exp not in self.exporter_incidents:
+                self.exporter_incidents[exp] = await self.pool.fetchval(
+                    """INSERT INTO incident (kind, started_at, details) VALUES ('exporter_stale', now(), $1) RETURNING id""",
+                    {"exporter": exp, "state": state})
+                log.error("FTD %s: NetFlow kelmayapti (%s)", exp, state)
+        for exp in [e for e in self.exporter_incidents if states.get(e) not in ("stale", "missing")]:
+            await self.pool.execute("UPDATE incident SET ended_at = now() WHERE id = $1", self.exporter_incidents.pop(exp))
+            log.info("FTD %s: NetFlow tiklandi", exp)
 
     def _collector_stale(self) -> bool:
         st = self.store.stats
@@ -339,7 +458,7 @@ class Engine:
         return await self._replace_console(product, await fetch_coro)
 
     async def _replace_console(self, product: str, records: list[ConsoleRecord]) -> int:
-        records = dedupe_latest(records)
+        records = assign_keys(records)
         prev = len(self.consoles.get(product, {}))
         # Himoya: API noto'g'ri/yarim javob qaytarsa, butun ro'yxat "o'rnatilmagan" bo'lib ketmasin.
         # Lekin bir xil natija ketma-ket takrorlansa — bu haqiqiy o'zgarish (masalan, eski yozuvlar tozalangan).
@@ -423,15 +542,14 @@ class Engine:
         resolved = resolve(cands, now, self.s.identity_max_age)
         store = self.store
 
-        def trustworthy(ip: str) -> bool:
-            # Hozir faol bo'lmagan IP xavf tug'dirmaydi; faol bo'lsa — domen trafigi bo'lishi kerak.
+        def session_start(ip: str) -> int | None:
+            # Hozir faol bo'lmagan IP xavf tug'dirmaydi; faol bo'lsa — joriy seans boshlanishi.
             pres = store.presence.get(ip)
             if pres is None or now - pres.last_seen > self.s.alive_window:
-                return True
-            dc = store.last.get((ip, "ad"))
-            return dc is not None and now - dc <= DC_TRAFFIC_WINDOW
+                return None
+            return pres.alive_since
 
-        resolved = verify(resolved, now, DNS_TRUST_AGE, trustworthy)
+        resolved = verify(resolved, session_start, lambda ip, grp: store.last.get((ip, grp)))
 
         new_map: dict[str, tuple[int, str, int | None, int]] = {}
         for ip, res in resolved.items():
@@ -478,6 +596,7 @@ class Engine:
         if self._collector_stale() or self.store.stats.watermark is None:
             log.warning("Kollektor ma'lumoti eskirgan — holatlar muzlatildi")
             return
+        await self._update_exporter_incidents()
         # Isinish: engine ishga tushgandan yoki NSEL uzilishidan keyin barcha hostlar bir oyna davomida
         # o'z trafigini yuborib ulgurishi kerak — aks holda hammasi bir zumda "oflayn" bo'lib ko'rinadi.
         if self.data_since is None or time.time() - self.data_since < self.s.alive_window:
@@ -536,7 +655,10 @@ class Engine:
                 if alive and alive_for >= judge_after[product]:
                     judgeable[product].append((h.id, product))
 
-        held = await self._detect_outages(cands, judgeable)
+        held, escalated = await self._detect_outages(cands, judgeable, now_wall)
+        for key, (state, reason, silent, net_last) in cands.items():
+            if key[1] in escalated and silent and state in SILENCE_STATES:
+                cands[key] = (state, f"{reason} ({OUTAGE_NOTE})", silent, net_last)
 
         changes: list[tuple[int, str, Tracked, bool, int | None]] = []
         staged: dict[tuple[int, str], Tracked] = {}
@@ -562,26 +684,52 @@ class Engine:
             "sources_ok": {k: dt(v).isoformat() for k, v in self.source_ok.items()},
         })
 
-    async def _detect_outages(self, cands, judgeable) -> set[str]:
-        """Oldin OK bo'lgan hostlarning katta qismi birdan jim bo'lsa — bu server/tarmoq muammosi."""
+    async def _detect_outages(self, cands, judgeable, now: int) -> tuple[set[str], set[str]]:
+        """Oldin OK bo'lgan hostlarning katta qismi birdan jim bo'lsa — bu server/tarmoq muammosi.
+
+        Qaytaradi: (jimlik hukmi ushlab turiladigan mahsulotlar, eskalatsiya qilingan mahsulotlar).
+        Uzilish MASS_OUTAGE_MAX_HOLD dan uzoq davom etsa, ushlab turish to'xtaydi: aks holda dashboard
+        cheksiz "hammasi OK" ko'rsatib turardi (masalan, Broker VM IP'si o'zgarganda).
+        """
+        s = self.s
         held: set[str] = set()
+        escalated: set[str] = set()
         for product, keys in judgeable.items():
-            base = [k for k in keys if (t := self.tracked.get(k)) and t.state == OK]
-            silent = [k for k in base if cands[k][2]]
-            ratio = len(silent) / len(base) if base else 0.0
-            active = len(base) >= self.s.mass_outage_min and ratio >= self.s.mass_outage_ratio
-            if active:
-                held.add(product)
-                if product not in self.outages:
-                    self.outages[product] = await self.pool.fetchval(
+            out = self.outages.get(product)
+            if out is None:
+                base = [k for k in keys if (t := self.tracked.get(k)) and t.state == OK]
+                silent = [k for k in base if cands[k][2]]
+                ratio = len(silent) / len(base) if base else 0.0
+                if len(base) >= s.mass_outage_min and ratio >= s.mass_outage_ratio:
+                    details = {"silent": len(silent), "base": len(base), "ratio": round(ratio, 3),
+                               "base_hosts": sorted(hid for hid, _ in base)}
+                    inc_id = await self.pool.fetchval(
                         """INSERT INTO incident (kind, product, started_at, details)
-                           VALUES ('mass_outage', $1, now(), $2) RETURNING id""",
-                        product, {"silent": len(silent), "base": len(base), "ratio": round(ratio, 3)})
+                           VALUES ('mass_outage', $1, $2, $3) RETURNING id""", product, dt(now), details)
+                    self.outages[product] = Outage(inc_id, frozenset(details["base_hosts"]), now)
+                    held.add(product)
                     log.error("OMMAVIY UZILISH: %s — %d/%d host jim", product, len(silent), len(base))
-            elif product in self.outages:
-                await self.pool.execute("UPDATE incident SET ended_at = now() WHERE id = $1", self.outages.pop(product))
+                continue
+
+            # Davom etmoqdami — boshlanishdagi bazaviy hostlar bo'yicha. Ma'lumot yetarli bo'lmasa
+            # (masalan, tunda hostlar o'chgan) xulosa chiqarilmaydi, holat o'zgarmaydi.
+            judge = [k for k in keys if k[0] in out.base]
+            silent = [k for k in judge if cands[k][2]]
+            ratio = len(silent) / len(judge) if judge else 0.0
+            if len(judge) >= s.mass_outage_min and ratio < s.mass_outage_ratio:
+                await self.pool.execute("UPDATE incident SET ended_at = now() WHERE id = $1", out.id)
+                del self.outages[product]
                 log.info("Ommaviy uzilish tugadi: %s", product)
-        return held
+                continue
+            if not out.escalated and now - out.started >= s.mass_outage_max_hold:
+                await self.pool.execute(
+                    """UPDATE incident SET details = details || jsonb_build_object('escalated', true,
+                           'escalated_at', $2::text) WHERE id = $1""", out.id, dt(now).isoformat())
+                out.escalated = True
+                log.error("OMMAVIY UZILISH %s %d soatdan beri davom etmoqda — hostlar haqiqiy holatiga o'tkaziladi",
+                          product, (now - out.started) // 3600)
+            (escalated if out.escalated else held).add(product)
+        return held, escalated
 
     async def _update_collector_incident(self) -> None:
         stale = self._collector_stale()
@@ -644,12 +792,21 @@ class Engine:
         """Ma'lumotlar hajmini chegaralash: eski IP signallari, tarix va statistika."""
         before = int(time.time()) - SIGNAL_RETENTION
         pruned = self.store.prune(before)
+        exps = self.store.stats.exporters
+        for exp in [e for e, es in exps.items() if e not in self.store.allowed_exporters
+                    and (es.last_rx or 0) < time.time() - EXPORTER_FORGET]:
+            del exps[exp]
         async with self.pool.acquire() as c:
             await c.execute("DELETE FROM ip_presence WHERE last_seen < $1", dt(before))
             await c.execute("DELETE FROM net_signal WHERE last_seen < $1", dt(before))
             await c.execute("DELETE FROM host_state_history WHERE ended_at < now() - interval '400 days'")
+            # Oflayn/tekshirilmoqda o'tishlari har kuni har host uchun takrorlanadi (~40-50 ming qator/kun) va
+            # hodisalar lentasida ko'rsatilmaydi — ular faqat yaqin kontekst uchun 30 kun saqlanadi.
+            await c.execute("""DELETE FROM host_state_history WHERE state IN ('OFFLINE', 'PENDING')
+                               AND ended_at < now() - interval '30 days'""")
             await c.execute("DELETE FROM coverage_snapshot WHERE ts < now() - interval '400 days'")
             await c.execute("DELETE FROM incident WHERE ended_at < now() - interval '400 days'")
+            await c.execute("DELETE FROM audit_log WHERE ts < now() - interval '730 days'")
         if pruned:
             log.info("Retention: %d ta eski IP o'chirildi", pruned)
 
@@ -660,3 +817,5 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, engine.stopping.set)
     await engine.run()
+    if engine.exit_code:
+        raise SystemExit(engine.exit_code)

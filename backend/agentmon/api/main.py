@@ -14,7 +14,9 @@ from pydantic import BaseModel, Field
 
 from agentmon import db
 from agentmon.api import queries
-from agentmon.api.auth import COOKIE, authenticate, check_config, current_user, issue_cookie, rate_limited
+from agentmon.api import auth
+from agentmon.api.auth import (COOKIE, Session, authenticate, check_config, current_session, current_user, issue_cookie,
+                               require_admin)
 from agentmon.config import Settings, get_settings, parse_endpoints, parse_subnets
 
 UTC = timezone.utc
@@ -24,6 +26,7 @@ log = logging.getLogger("agentmon.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     check_config(s)   # noto'g'ri sozlama bo'lsa — darhol va aniq xato, har so'rovda 500 emas
     if s.web_auth == "none":
         log.warning("WEB_AUTH=none — interfeys autentifikatsiyasiz ochiq! Faqat test uchun.")
@@ -37,10 +40,22 @@ app = FastAPI(title="AgentMon", lifespan=lifespan, default_response_class=ORJSON
               docs_url=None, redoc_url=None, openapi_url=None)
 
 User = Annotated[str, Depends(current_user)]
+Admin = Annotated[Session, Depends(require_admin)]
 
 
 def pool(request: Request):
     return request.app.state.pool
+
+
+def client_ip(request: Request) -> str:
+    # Haqiqiy mijoz IP'si: nginx X-Forwarded-For'ni o'zi o'rnatadi, uvicorn --forwarded-allow-ips unga ishonadi.
+    return request.client.host if request.client else "?"
+
+
+async def audit(request: Request, user: str, action: str, target: str | None = None, **details) -> None:
+    await pool(request).execute(
+        "INSERT INTO audit_log (username, ip, action, target, details) VALUES ($1, $2, $3, $4, $5)",
+        user, client_ip(request), action, target, details)
 
 
 # ------------------------------------------------------------------ auth
@@ -51,15 +66,23 @@ class LoginIn(BaseModel):
 
 @app.post("/api/login")
 async def login(body: LoginIn, request: Request, response: Response, s: Settings = Depends(get_settings)):
-    client = request.client.host if request.client else "?"
-    if rate_limited(f"{client}:{body.username.lower()}"):
-        raise HTTPException(429, "Juda ko'p urinish. Birozdan keyin qayta urinib ko'ring")
-    user = await authenticate(s, body.username.strip(), body.password)
-    if not user:
+    client = client_ip(request)
+    username = body.username.strip()
+    p = pool(request)
+    if await auth.login_blocked(p, client, username):
+        log.warning("login bloklandi: ip=%s user=%r", client, username)
+        raise HTTPException(429, "Juda ko'p muvaffaqiyatsiz urinish. Birozdan keyin qayta urinib ko'ring")
+    session = await authenticate(s, username, body.password)
+    if not session:
+        await auth.record_failure(p, client, username)
+        log.warning("login muvaffaqiyatsiz: ip=%s user=%r", client, username)
         raise HTTPException(401, "Login yoki parol noto'g'ri, yoki ruxsat yo'q")
-    response.set_cookie(COOKIE, issue_cookie(s, user), max_age=s.web_session_hours * 3600, httponly=True,
+    await auth.clear_failures(p, client, username)
+    log.info("login: ip=%s user=%s role=%s", client, session.user, session.role)
+    await audit(request, session.user, "login", role=session.role)
+    response.set_cookie(COOKIE, issue_cookie(s, session), max_age=s.web_session_hours * 3600, httponly=True,
                         samesite="strict", secure=s.web_cookie_secure, path="/")
-    return {"user": user}
+    return {"user": session.user, "role": session.role}
 
 
 @app.post("/api/logout")
@@ -69,8 +92,8 @@ async def logout(response: Response):
 
 
 @app.get("/api/me")
-async def me(user: User, s: Settings = Depends(get_settings)):
-    return {"user": user, "auth": s.web_auth, "products": list(s.products)}
+async def me(session: Annotated[Session, Depends(current_session)], s: Settings = Depends(get_settings)):
+    return {"user": session.user, "role": session.role, "auth": s.web_auth, "products": list(s.products)}
 
 
 # ------------------------------------------------------------------ dashboard
@@ -85,7 +108,8 @@ async def summary(request: Request, user: User, s: Settings = Depends(get_settin
              AND NOT EXISTS (SELECT 1 FROM host_ip h WHERE h.ip = p.ip)
              AND NOT EXISTS (SELECT 1 FROM ip_ignore i WHERE i.ip = p.ip)""")
     out["incidents"] = [dict(r) for r in await p.fetch(
-        "SELECT id, kind, product, started_at, details FROM incident WHERE ended_at IS NULL ORDER BY started_at")]
+        """SELECT id, kind, product, started_at, details - 'base_hosts' AS details
+           FROM incident WHERE ended_at IS NULL ORDER BY started_at""")]
     out["status"] = await _status(p)
     return out
 
@@ -268,12 +292,15 @@ class ExcludeIn(BaseModel):
 
 
 @app.post("/api/hosts/{host_id}/exclude")
-async def host_exclude(host_id: int, body: ExcludeIn, request: Request, user: User):
-    res = await pool(request).execute(
-        "UPDATE host SET excluded = $2, note = $3, updated_at = now() WHERE id = $1",
-        host_id, body.excluded, (body.note or "").strip() or None)
-    if res.endswith(" 0"):
+async def host_exclude(host_id: int, body: ExcludeIn, request: Request, admin: Admin):
+    note = (body.note or "").strip() or None
+    name = await pool(request).fetchval(
+        "UPDATE host SET excluded = $2, note = $3, updated_at = now() WHERE id = $1 RETURNING display_name",
+        host_id, body.excluded, note)
+    if name is None:
         raise HTTPException(404, "Host topilmadi")
+    await audit(request, admin.user, "host.exclude" if body.excluded else "host.include", name,
+                host_id=host_id, note=note)
     queries.invalidate()
     return {"ok": True}
 
@@ -288,7 +315,10 @@ async def unknown(request: Request, user: User, hours: int = Query(24, ge=1, le=
                   coalesce((SELECT jsonb_object_agg(grp, last_seen) FROM net_signal s
                             WHERE s.ip = p.ip AND s.last_seen > now() - interval '24 hours'), '{}') AS signals,
                   (SELECT d.fqdn FROM dns_record d WHERE d.ip = p.ip
-                   ORDER BY d.observed_at DESC NULLS LAST LIMIT 1) AS dns_name
+                   ORDER BY d.observed_at DESC NULLS LAST LIMIT 1) AS dns_name,
+                  -- Moslash rad etilgan IP: agent oldin shu IP bilan xabar bergan kompyuter (operator uchun ishora).
+                  (SELECT upper(c.display_name) FROM console_endpoint c WHERE c.ips @> ARRAY[p.ip]
+                   ORDER BY c.last_seen DESC NULLS LAST LIMIT 1) AS prev_owner
            FROM ip_presence p
            WHERE p.last_seen > now() - make_interval(hours => $1)
              AND NOT EXISTS (SELECT 1 FROM host_ip h WHERE h.ip = p.ip)
@@ -305,7 +335,7 @@ class IgnoreIn(BaseModel):
 
 
 @app.post("/api/unknown/ignore")
-async def ignore_ip(body: IgnoreIn, request: Request, user: User):
+async def ignore_ip(body: IgnoreIn, request: Request, admin: Admin):
     try:
         ip = str(ipaddress.ip_address(body.ip))
     except ValueError:
@@ -313,7 +343,8 @@ async def ignore_ip(body: IgnoreIn, request: Request, user: User):
     await pool(request).execute(
         """INSERT INTO ip_ignore (ip, note, created_by) VALUES ($1::inet, $2, $3)
            ON CONFLICT (ip) DO UPDATE SET note = EXCLUDED.note, created_by = EXCLUDED.created_by""",
-        ip, (body.note or "").strip() or None, user)
+        ip, (body.note or "").strip() or None, admin.user)
+    await audit(request, admin.user, "ip.ignore", ip, note=(body.note or "").strip() or None)
     return {"ok": True}
 
 
@@ -324,13 +355,20 @@ async def ignored(request: Request, user: User):
 
 
 @app.delete("/api/unknown/ignore/{ip}")
-async def unignore_ip(ip: str, request: Request, user: User):
+async def unignore_ip(ip: str, request: Request, admin: Admin):
     try:
         ip = str(ipaddress.ip_address(ip))
     except ValueError:
         raise HTTPException(400, "IP noto'g'ri") from None
     await pool(request).execute("DELETE FROM ip_ignore WHERE ip = $1::inet", ip)
+    await audit(request, admin.user, "ip.unignore", ip)
     return {"ok": True}
+
+
+@app.get("/api/audit")
+async def audit_log(request: Request, user: User, limit: int = Query(100, ge=1, le=1000)):
+    return [dict(r) for r in await pool(request).fetch(
+        "SELECT ts, username, ip, action, target, details FROM audit_log ORDER BY ts DESC LIMIT $1", limit)]
 
 
 # ------------------------------------------------------------------ system
@@ -341,7 +379,7 @@ async def system(request: Request, user: User, s: Settings = Depends(get_setting
         "status": await _status(p),
         "sources": [dict(r) for r in await p.fetch("SELECT * FROM source_status ORDER BY source")],
         "incidents": [dict(r) for r in await p.fetch(
-            """SELECT id, kind, product, started_at, ended_at, details FROM incident
+            """SELECT id, kind, product, started_at, ended_at, details - 'base_hosts' AS details FROM incident
                WHERE ended_at IS NULL OR ended_at > now() - interval '30 days' ORDER BY started_at DESC LIMIT 100""")],
         "subnets": _merge_subnets(
             [dict(r) for r in await p.fetch("SELECT cidr::text AS cidr, site, source FROM net_subnet ORDER BY cidr")],

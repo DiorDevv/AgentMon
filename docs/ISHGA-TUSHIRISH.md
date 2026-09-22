@@ -111,16 +111,30 @@ sudo sysctl --system
 
 ✅ `sysctl net.core.rmem_max` → `net.core.rmem_max = 33554432`
 
-### 1.4. Server firewall'i (ufw)
+### 1.4. Server firewall'i
+
+> ⚠ **Muhim:** Docker e'lon qilgan portlar (NetFlow 2055, web 8443/8088) **ufw qoidalarini chetlab o'tadi**.
+> `ufw deny` ularni yopmaydi — Docker trafikni o'z iptables zanjirlariga to'g'ridan-to'g'ri yo'naltiradi.
+> Shuning uchun ufw faqat SSH uchun, Docker portlari esa `DOCKER-USER` zanjiri orqali cheklanadi.
 
 ```bash
 sudo ufw allow OpenSSH
-sudo ufw allow 2055/udp comment 'AgentMon NetFlow'
-sudo ufw allow 8088/tcp comment 'AgentMon web'
 sudo ufw enable
 ```
 
-> Keyinchalik (12-qadam) HTTPS sozlanganda 8088 o'rniga 443 ochiladi.
+Docker portlari uchun qoidalar **5-qadamdan keyin** (`.env` to'ldirilgach, Docker ishga tushgach) qo'yiladi:
+
+```bash
+cd /opt/agentmon
+sudo ./deploy/docker-firewall.sh        # NetFlow: faqat NSEL_EXPORTERS; web: faqat WEB_ALLOWED_NETS
+sudo ./deploy/docker-firewall.sh --show # tekshirish
+# Qayta yuklanishdan keyin ham qo'llanishi uchun:
+sudo cp deploy/agentmon-firewall.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now agentmon-firewall
+```
+
+✅ Boshqa kompyuterdan `python3 tools/nsel_sim.py --collector <SERVER_IP> ...` yuborilganda Redis'ga hech narsa
+tushmaydi (`docker compose exec redis redis-cli LLEN nsel` → `0`). `.env` o'zgarsa skriptni qayta ishga tushiring.
 
 ---
 
@@ -134,7 +148,7 @@ sudo ufw enable
 | 2 | `<SERVER_IP>` | DC | **TCP 636** (LDAPS) | AD: kompyuterlar, DNS, subnetlar |
 | 3 | `<SERVER_IP>` | Cortex cloud (`api-xxx.xdr...paloaltonetworks.com`) | **TCP 443** | Cortex API |
 | 4 | `<SERVER_IP>` | `172.25.25.111` | **TCP 13299** | KSC OpenAPI |
-| 5 | Xodimlar (IT/SOC) | `<SERVER_IP>` | **TCP 8088** (keyinroq 443) | Web interfeys |
+| 5 | Xodimlar (IT/SOC) | `<SERVER_IP>` | **TCP 8443** (HTTPS), 8088 (faqat yo'naltirish) | Web interfeys |
 | 6 | `<SERVER_IP>` | DNS server | UDP/TCP 53 | Nomlarni aniqlash |
 
 ✅ **Tekshirish (serverda):**
@@ -181,6 +195,16 @@ Add-ADGroupMember -Identity "AgentMon-Users" -Members "i.familiyev","a.karimov"
 ```
 
 ✅ Natija, masalan: `CN=AgentMon-Users,OU=Groups,DC=corp,DC=local`. **Nusxa olib qo'ying.**
+
+**O'zgartirish huquqi uchun alohida guruh** (hostni istisno qilish, IP'ni "ma'lum qurilma" deb yashirish).
+Qolgan foydalanuvchilar faqat ko'radi; har bir o'zgarish "Tizim holati → Audit jurnali"da yoziladi:
+```powershell
+New-ADGroup -Name "AgentMon-Admins" -GroupScope Global -GroupCategory Security `
+  -Path "OU=Groups,DC=corp,DC=local" -Description "AgentMon: o'zgartirish huquqi"
+Add-ADGroupMember -Identity "AgentMon-Admins" -Members "i.familiyev"
+Add-ADGroupMember -Identity "AgentMon-Users" -Members "AgentMon-Admins"   # adminlar kirish guruhida ham bo'lsin
+(Get-ADGroup "AgentMon-Admins").DistinguishedName                        # → WEB_ADMIN_GROUP
+```
 
 Shu yerda yana ikkita qiymatni yozib oling:
 ```powershell
@@ -258,7 +282,17 @@ echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
 echo "WEB_SECRET=$(openssl rand -hex 32)"
 ```
 
-Chiqqan ikki qatorni `.env` dagi tegishli qatorlar o'rniga qo'ying.
+Chiqqan ikki qatorni `.env` dagi tegishli qatorlar o'rniga qo'ying (namunada ular ataylab bo'sh — bo'sh yoki eski
+namunadagi qiymat bilan tizim ishga tushmaydi).
+
+**Ichki CA sertifikati** (LDAPS'ni tekshirish uchun — busiz tarmoqdagi hujumchi AD parollarini ushlab qolishi mumkin):
+```bash
+mkdir -p /opt/agentmon/ca
+# CA serveridan olingan ca.cer (DER yoki Base-64) → PEM:
+openssl x509 -in ca.cer -inform der -out /opt/agentmon/ca/corp-ca.pem 2>/dev/null \
+  || cp ca.cer /opt/agentmon/ca/corp-ca.pem
+```
+`.env` da: `AD_VERIFY_TLS=true`, `AD_CA_FILE=/app/ca/corp-ca.pem`.
 
 ### 5.2. `.env` ni tahrirlash
 
@@ -285,6 +319,11 @@ Faylda har bir qator ustida izoh bor. Quyidagilarni **albatta** o'zgartiring:
 | `CORTEX_KEY` | Uzun kalit | 3.3 |
 | `KSC_USER` / `KSC_PASSWORD` | `agentmon_ro` / parol | 3.4 |
 | `WEB_ALLOWED_GROUP` | `CN=AgentMon-Users,OU=Groups,DC=corp,DC=local` | 3.2 |
+| `WEB_ADMIN_GROUP` | `CN=AgentMon-Admins,OU=Groups,DC=corp,DC=local` | 3.2 |
+| `NSEL_EXPORTERS` | Barcha FTD'larning NetFlow yuboradigan interfeys IP'lari, vergul bilan | 8-qadam, tarmoq admini |
+| `AD_CA_FILE` | Ichki CA sertifikati (`./ca/corp-ca.pem` → `/app/ca/corp-ca.pem`) | CA serveri |
+| `WEB_TLS_CN` | Brauzerda ochiladigan nom, masalan `agentmon.corp.local` | DNS |
+| `REDIS_MAXMEMORY` | `4gb` (RAM 16 GB bo'lsa) | — |
 
 **O'zgartirmaslik kerak bo'lgan qiymatlar:**
 - `TARGET_*`: sizning Broker VM, KSC va SI IP'laringiz allaqachon yozilgan.
@@ -347,13 +386,14 @@ web        Up
 ```
 
 ```bash
-curl -s http://localhost:8088/api/health       # {"ok":true}
+curl -sk https://localhost:8443/api/health     # {"ok":true}
 docker compose logs --tail 20 engine
 ```
 
 Engine logida `engine ishga tushdi` yozuvi chiqishi kerak. Keyin, bir necha soniyada, `ad: N ta yozuv`, `cortex: N ta yozuv`, `ksc: N ta yozuv` yozuvlari paydo bo'ladi.
 
-🌐 Brauzerda `http://<SERVER_IP>:8088` ni oching va AD hisobingiz (guruh a'zosi) bilan kiring.
+🌐 Brauzerda `https://<SERVER_IP>:8443` ni oching va AD hisobingiz (guruh a'zosi) bilan kiring.
+Sertifikat hali korporativ CA'dan qo'yilmagan bo'lsa, brauzer o'z-o'zidan imzolangan sertifikat haqida ogohlantiradi (12.1).
 
 ---
 
@@ -398,6 +438,11 @@ To'liq ko'rsatma: [`deploy/ftd-netflow.md`](../deploy/ftd-netflow.md). Qisqacha:
 4. **Deploy** qiling.
 
 > **Tavsiya:** avval faqat **markaziy FTD**'ni ulang. 9-qadamdagi tekshiruvdan o'tgach, filiallardagi FTD'larni qo'shing.
+
+> **Muhim:** har bir yangi FTD'ning `<INTERFEYS>` IP'sini `.env` dagi `NSEL_EXPORTERS` ga qo'shing, so'ng
+> `docker compose up -d` va `sudo ./deploy/docker-firewall.sh`. Ro'yxatda yo'q FTD'dan kelgan NetFlow
+> Logstash'da ham, engine'da ham tashlab yuboriladi ("Tizim holati → Rad etilgan" soni oshadi).
+> "Tizim holati → NetFlow eksporterlari" jadvalida har bir FTD'ning holati ko'rinadi.
 
 ✅ **FTD'da tekshirish** (CLI → `system support diagnostic-cli`):
 ```
@@ -508,46 +553,25 @@ docker compose up -d engine api
 
 Pilot muvaffaqiyatli bo'lgach, barcha FTD'larni ulashdan **oldin** quyidagilarni bajaring.
 
-### 12.1. HTTPS (majburiy)
+### 12.1. HTTPS sertifikati
 
-Hozir interfeys oddiy HTTP orqali ochiladi. Login paytida AD paroli tarmoqdan **ochiq** ketadi.
+Interfeys **faqat HTTPS** orqali ishlaydi (web konteyner ichida): HTTP porti (8088) faqat HTTPS'ga yo'naltiradi,
+sessiya cookie'si `Secure`. Sertifikat berilmagan bo'lsa, birinchi ishga tushishda o'z-o'zidan imzolangan
+sertifikat yaratiladi (`./certs/`) — ishlaydi, lekin brauzer ogohlantiradi. Real muhitda ichki CA sertifikatini qo'ying:
 
-Eng oddiy yo'l: serverda nginx'ni ichki CA sertifikati bilan reverse-proxy qilib qo'yish.
-
-1. AgentMon'ni faqat lokal manzilda ochiq qoldiring. `.env` da:
-   ```
-   WEB_PORT=127.0.0.1:8088
-   WEB_COOKIE_SECURE=true
-   ```
-2. Sertifikatni ichki CA'dan oling (`agentmon.corp.local` uchun). Uni `/etc/ssl/agentmon.crt` va `/etc/ssl/agentmon.key` ga qo'ying.
-3. nginx'ni o'rnating va sozlang:
+1. Ichki CA'dan `agentmon.corp.local` uchun sertifikat oling (SAN'da shu nom bo'lishi shart).
+2. Uni serverga qo'ying (fayl nomlari aynan shunday):
    ```bash
-   sudo apt install -y nginx
-   sudo tee /etc/nginx/sites-available/agentmon >/dev/null <<'EOF'
-   server {
-       listen 443 ssl;
-       server_name agentmon.corp.local;
-       ssl_certificate     /etc/ssl/agentmon.crt;
-       ssl_certificate_key /etc/ssl/agentmon.key;
-       ssl_protocols TLSv1.2 TLSv1.3;
-       location / {
-           proxy_pass http://127.0.0.1:8088;
-           proxy_set_header Host $host;
-           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-           proxy_set_header X-Forwarded-Proto https;
-       }
-   }
-   server { listen 80; server_name agentmon.corp.local; return 301 https://$host$request_uri; }
-   EOF
-   sudo ln -s /etc/nginx/sites-available/agentmon /etc/nginx/sites-enabled/
-   sudo rm -f /etc/nginx/sites-enabled/default
-   sudo nginx -t && sudo systemctl reload nginx
-   sudo ufw allow 443/tcp && sudo ufw delete allow 8088/tcp
-   docker compose up -d
+   sudo cp agentmon.crt /opt/agentmon/certs/tls.crt      # oraliq CA'lar bilan birga (fullchain)
+   sudo cp agentmon.key /opt/agentmon/certs/tls.key
+   sudo chmod 600 /opt/agentmon/certs/tls.key
+   docker compose restart web
    ```
-4. DNS'da `agentmon.corp.local` → `<SERVER_IP>` yozuvini yarating.
+3. DNS'da `agentmon.corp.local` → `<SERVER_IP>` yozuvini yarating.
+4. Standart 443 portida ochish uchun `.env` da: `WEB_HTTPS_PORT=443`, `WEB_PORT=80` (`docker compose up -d` va
+   `sudo ./deploy/docker-firewall.sh` qayta).
 
-✅ `https://agentmon.corp.local` ochiladi, brauzer sertifikat haqida ogohlantirmaydi.
+✅ `https://agentmon.corp.local:8443` (yoki 443) ochiladi, brauzer sertifikat haqida ogohlantirmaydi.
 
 ### 12.2. Zaxira nusxa (backup)
 
@@ -610,7 +634,7 @@ cd /opt/agentmon
 sudo /etc/cron.daily/agentmon-backup           # avval backup
 tar -xzf /tmp/agentmon-yangi.tar.gz -C /opt/agentmon --strip-components=1   # .env ga tegmaydi
 docker compose up -d --build
-docker compose ps && curl -s http://localhost:8088/api/health
+docker compose ps && curl -sk https://localhost:8443/api/health
 ```
 
 ### Interfeysdan kundalik foydalanish
@@ -647,7 +671,8 @@ docker compose ps && curl -s http://localhost:8088/api/health
 |---|---|
 | `invalidCredentials` | `AD_USER` va `AD_PASSWORD` ni tekshiring. Parolda `$` bo'lsa, bitta tirnoqqa oling. UPN formati: `svc_agentmon@corp.local` |
 | `socket` / `timed out` / `Can't contact` | 636-port yopiq yoki DC'da LDAPS yo'q: `nc -zv dc01 636` |
-| `certificate verify failed` | `AD_VERIFY_TLS=false` qiling yoki ichki CA'ni o'rnating |
+| `certificate verify failed` | `AD_CA_FILE` to'g'ri CA'mi (DC sertifikatini imzolagan)? `AD_SERVER` dagi nom sertifikatdagi nomga mosmi (IP emas, FQDN yozing)? Vaqtincha: `AD_VERIFY_TLS=false` |
+| `AD_CA_FILE topilmadi` | Fayl `./ca/` papkasida bo'lishi va `.env` da `/app/ca/...` yo'li bilan yozilishi kerak |
 | Kompyuterlar soni 0 | `AD_BASE_DN` noto'g'ri: `(Get-ADDomain).DistinguishedName` bilan solishtiring |
 | Ko'p kompyuterda "IP aniqlanmadi" | `AD_DNS_ZONE` noto'g'ri yoki DNS AD-integrated emas. DNS Manager'dagi zona nomini yozing |
 
@@ -674,7 +699,9 @@ docker compose ps && curl -s http://localhost:8088/api/health
 |---|---|
 | Sahifa ochilmaydi | `docker compose ps` → `web` va `api` `Up` holatidami? Port firewall'da ochiqmi? |
 | "Login yoki parol noto'g'ri, yoki ruxsat yo'q" | Foydalanuvchi `WEB_ALLOWED_GROUP` guruhida bormi? AD ishlamasa, `admin` bilan kiring |
-| "Juda ko'p urinish" | 1 daqiqa kuting (brute-force himoyasi) |
+| "Juda ko'p muvaffaqiyatsiz urinish" | 5 daqiqa kuting (bitta IP'dan bitta login uchun 5 daqiqada 5 ta, jami 15 daqiqada 20 ta xato urinish) |
+| "Istisno qilish" tugmasi yo'q / `403` | Foydalanuvchi `WEB_ADMIN_GROUP` da emas (rol: Kuzatuvchi). Guruhga qo'shilgach, qayta kiring |
+| Brauzer sertifikat haqida ogohlantiradi | Korporativ sertifikat qo'yilmagan (12.1) |
 | `502 Bad Gateway` | `docker compose logs api`: API xato bilan to'xtagan bo'lishi mumkin (masalan, `.env` da `WEB_SECRET` qisqa) |
 
 ### Yordam so'rashdan oldin to'playdigan ma'lumotlar
