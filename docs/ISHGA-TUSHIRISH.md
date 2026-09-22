@@ -13,6 +13,46 @@ Har bir qadamda:
 
 ---
 
+## ⚡ Tezkor yo'l: bitta skript (tavsiya etiladi)
+
+1, 4, 5, 6-qadamlar va firewall (1.4) — hammasini `deploy/setup-vm.sh` o'zi bajaradi. Internetga faqat korporativ
+proxy orqali chiqadigan VM uchun mo'ljallangan (Squid VM bilan bir xil sxema). Undan oldin kerak bo'ladi:
+**2-qadam** (tarmoq ruxsatlari), **3-qadam** (servis hisoblari, Cortex kaliti, KSC foydalanuvchisi) va proxy manzili
+(Squid VM'da: `grep -E '^HTTPS?_PROXY=' ~/squid-watch/.env`).
+
+```bash
+# O'z kompyuteringizdan skriptni VM'ga ko'chiring (repo yopiq — VM uni o'zi yuklab oladi, token so'raydi):
+scp deploy/setup-vm.sh <login>@<VM_IP>:~
+# VM'da:
+sudo bash ~/setup-vm.sh
+```
+
+Skript nima qiladi (qayta ishga tushirish xavfsiz — bor sozlamalar saqlanadi):
+1. Proxy'ni so'raydi, **ishlashini tekshiradi** (github.com orqali) va apt, Docker, git'ga sozlaydi.
+2. Kerakli paketlar va Docker'ni o'rnatadi, NetFlow UDP buferini oshiradi.
+3. Kodni oladi: GitHub'dan (faqat o'qish huquqli fine-grained token so'raladi, `/etc/agentmon/` da faqat root o'qiydi)
+   yoki `AGENTMON_ARCHIVE=/yo'l/agentmon.tar.gz` bilan arxivdan.
+4. `.env` ni savol-javob bilan to'ldiradi: sirlarni o'zi yaratadi, resurslarni VM RAM/CPU'siga qarab tanlaydi,
+   favqulodda admin parolini yaratadi (oxirida **bir marta** ko'rsatiladi).
+5. Build (proxy orqali) va ishga tushirish, barcha servislar sog'lomligini kutadi.
+6. `DOCKER-USER` firewall (NetFlow faqat FTD'lardan) — qayta yuklanishdan keyin ham.
+7. Tekshiruv: DC (LDAPS), KSC, Cortex (proxy orqali), web, inventar sinxronlanishi.
+
+Keyin:
+```bash
+sudo bash /opt/agentmon/deploy/setup-vm.sh check           # holatni qayta tekshirish
+sudo bash /opt/agentmon/deploy/setup-vm.sh update          # yangi versiya: git pull → build → ishga tushirish
+sudo RECONFIGURE=1 bash /opt/agentmon/deploy/setup-vm.sh   # sozlamalarni qaytadan kiritish (masalan, CA fayli)
+sudo bash /opt/agentmon/deploy/setup-vm.sh admin-password  # favqulodda admin parolini yangilash
+```
+Savollarsiz (avtomatik) o'rnatish: javoblarni muhit o'zgaruvchisi sifatida bering, masalan
+`sudo PROXY=http://172.25.1.10:3128 NSEL_EXPORTERS=172.25.0.1 AD_DOMAIN=corp.uz ... bash setup-vm.sh`.
+Kod `main` dan boshqa branch'da bo'lsa: `AGENTMON_BRANCH=<branch>`.
+
+Skript tugagach, **7-qadamdan** davom eting (inventar va FTD). Qolgan qadamlar — qo'lda o'rnatish uchun ma'lumotnoma.
+
+---
+
 > **AD hozircha ulanmayaptimi?** Tizim AD'siz ham ishlaydi — [AD'siz rejim](#adsiz-rejim-vaqtinchalik) bo'limiga qarang.
 > Bunda 3.1–3.2 qadamlar va 2-qadamdagi DC (636) ruxsati kerak emas.
 

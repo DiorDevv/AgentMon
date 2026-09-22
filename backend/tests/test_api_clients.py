@@ -98,3 +98,34 @@ async def test_ksc_error_is_raised(mock_http):
     mock_http(handler)
     with pytest.raises(RuntimeError, match="Access denied"):
         await ksc.fetch(Settings(_env_file=None, ksc_url="https://ksc:13299", ksc_user="u", ksc_password="p"))
+
+
+async def test_proxy_only_for_cloud_cortex_not_internal_ksc(monkeypatch):
+    """Internetga proxy orqali chiqiladigan serverda: Cortex (bulut) — proxy orqali, KSC (ichki) — hech qachon."""
+    import httpx
+
+    from agentmon.config import Settings
+    from agentmon.engine.inventory import cortex, ksc
+    seen: dict[str, bool] = {}
+    real = httpx.AsyncClient
+
+    class Spy(real):
+        def __init__(self, *a, **kw):
+            seen["ksc" if "verify" in kw else "cortex"] = kw.get("trust_env", True)
+            super().__init__(*a, transport=httpx.MockTransport(lambda r: httpx.Response(500)), **kw)
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setattr(httpx, "AsyncClient", Spy)
+    monkeypatch.setattr("agentmon.engine.inventory.http.asyncio.sleep", lambda *_: _none())
+    s = Settings(_env_file=None, cortex_fqdn="api-x.xdr.eu.paloaltonetworks.com", cortex_key="k",
+                 ksc_url="https://172.25.25.111:13299", ksc_user="u")
+    for fetch in (cortex.fetch, ksc.fetch):
+        try:
+            await fetch(s)
+        except httpx.HTTPStatusError:
+            pass
+    assert seen == {"cortex": True, "ksc": False}
+
+
+async def _none():
+    return None

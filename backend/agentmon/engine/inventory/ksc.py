@@ -114,7 +114,8 @@ async def fetch(s: Settings) -> list[ConsoleRecord]:
     now = datetime.now(timezone.utc)
     max_age = timedelta(hours=s.ksc_bases_max_age_hours)
 
-    async with httpx.AsyncClient(verify=ksc_verify(s), timeout=120,
+    # KSC — ichki server: .env dagi HTTPS_PROXY (Cortex uchun) unga hech qachon qo'llanmasin.
+    async with httpx.AsyncClient(verify=ksc_verify(s), timeout=120, trust_env=False,
                                  headers={"Content-Type": "application/json"}) as client:
         await http.post(client, base + "login", headers={"Authorization": auth})
 

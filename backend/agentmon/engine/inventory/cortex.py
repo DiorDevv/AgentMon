@@ -65,7 +65,8 @@ def to_record(ep: dict) -> ConsoleRecord | None:
 async def fetch(s: Settings) -> list[ConsoleRecord]:
     url = f"https://{s.cortex_fqdn}/public_api/v1/endpoints/get_endpoint/"
     records: list[ConsoleRecord] = []
-    async with httpx.AsyncClient(timeout=60) as client:
+    # Cortex — bulutda: internetga faqat proxy orqali chiqiladigan serverda HTTPS_PROXY (.env) ishlatiladi.
+    async with httpx.AsyncClient(timeout=60, trust_env=True) as client:
         start, total = 0, None
         while total is None or start < total:
             body = {"request_data": {"filters": [], "search_from": start, "search_to": start + PAGE,
