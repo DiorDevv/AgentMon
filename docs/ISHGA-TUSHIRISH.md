@@ -13,40 +13,63 @@ Har bir qadamda:
 
 ---
 
-## ⚡ Tezkor yo'l: bitta skript (tavsiya etiladi)
+## ⚡ Tezkor yo'l: bitta skript, bosqichma-bosqich (tavsiya etiladi)
 
 1, 4, 5, 6-qadamlar va firewall (1.4) — hammasini `deploy/setup-vm.sh` o'zi bajaradi. Internetga faqat korporativ
-proxy orqali chiqadigan VM uchun mo'ljallangan (Squid VM bilan bir xil sxema). Undan oldin kerak bo'ladi:
-**2-qadam** (tarmoq ruxsatlari), **3-qadam** (servis hisoblari, Cortex kaliti, KSC foydalanuvchisi) va proxy manzili
-(Squid VM'da: `grep -E '^HTTPS?_PROXY=' ~/squid-watch/.env`).
+proxy orqali chiqadigan VM uchun mo'ljallangan (Squid VM bilan bir xil sxema). O'rnatish **bosqichma-bosqich**:
+avval faqat FTD (NetFlow) va web, NetFlow kelayotgani tasdiqlangach AD, Cortex, KSC bittadan qo'shiladi.
+
+**1-bosqich uchun kerak:** proxy manzili (Squid VM'da: `grep -E '^HTTPS?_PROXY=' ~/squid-watch/.env`),
+FTD'lar flow-export interfeysi IP'lari, foydalanuvchi subnetlari, FTD → VM UDP 2055 ruxsati.
 
 ```bash
-# O'z kompyuteringizdan skriptni VM'ga ko'chiring (repo yopiq — VM uni o'zi yuklab oladi, token so'raydi):
+# Skriptni VM'ga olib o'ting — o'z kompyuteringizdan:
 scp deploy/setup-vm.sh <login>@<VM_IP>:~
-# VM'da:
+#   yoki VM'ning o'zida proxy orqali:
+#   curl -x http://<PROXY_IP>:3128 -fsSLO https://raw.githubusercontent.com/DiorDevv/AgentMon/main/deploy/setup-vm.sh
+
+# VM'da — 1-bosqich: FTD (NetFlow) + web
 sudo bash ~/setup-vm.sh
 ```
 
-Skript nima qiladi (qayta ishga tushirish xavfsiz — bor sozlamalar saqlanadi):
+1-bosqichda skript nima qiladi (qayta ishga tushirish xavfsiz — bor sozlamalar saqlanadi):
 1. Proxy'ni so'raydi, **ishlashini tekshiradi** (github.com orqali) va apt, Docker, git'ga sozlaydi.
 2. Kerakli paketlar va Docker'ni o'rnatadi, NetFlow UDP buferini oshiradi.
-3. Kodni oladi: GitHub'dan (faqat o'qish huquqli fine-grained token so'raladi, `/etc/agentmon/` da faqat root o'qiydi)
-   yoki `AGENTMON_ARCHIVE=/yo'l/agentmon.tar.gz` bilan arxivdan.
-4. `.env` ni savol-javob bilan to'ldiradi: sirlarni o'zi yaratadi, resurslarni VM RAM/CPU'siga qarab tanlaydi,
-   favqulodda admin parolini yaratadi (oxirida **bir marta** ko'rsatiladi).
+3. Kodni oladi: GitHub'dan (repo yopiq bo'lsagina faqat o'qish huquqli fine-grained token so'raladi) yoki
+   `AGENTMON_ARCHIVE=/yo'l/agentmon.tar.gz` bilan arxivdan.
+4. `.env`: faqat FTD va web savollari — FTD IP'lari (majburiy), foydalanuvchi subnetlari (AD'siz majburiy),
+   chiqarib tashlanadigan subnetlar, DC IP'lari (ixtiyoriy), web nomi va ruxsat etilgan tarmoqlar. Kiritilgan IP va
+   subnetlar formati tekshiriladi. AD, Cortex, KSC **ulanmaydi** (namunaviy qiymatlari tozalanadi).
+   Sirlar va favqulodda admin paroli o'zi yaratiladi (oxirida **bir marta** ko'rsatiladi).
 5. Build (proxy orqali) va ishga tushirish, barcha servislar sog'lomligini kutadi.
 6. `DOCKER-USER` firewall (NetFlow faqat FTD'lardan) — qayta yuklanishdan keyin ham.
-7. Tekshiruv: DC (LDAPS), KSC, Cortex (proxy orqali), web, inventar sinxronlanishi.
+7. Tekshiruv: NetFlow kelyaptimi, har bir FTD holati, flow-update hodisalari, web.
 
-Keyin:
+Keyin FTD'da NetFlow eksportini yoqing (`deploy/ftd-netflow.md`) va tekshiring:
 ```bash
-sudo bash /opt/agentmon/deploy/setup-vm.sh check           # holatni qayta tekshirish
+sudo bash /opt/agentmon/deploy/setup-vm.sh check    # "FTD <ip>: kelyapti" chiqishi kerak
+```
+1-bosqichda web'da NetFlow holati, FTD'lar va trafik ko'ringan qurilmalar ("Noma'lum qurilmalar") ko'rinadi.
+Kompyuterlar ro'yxati (inventar) keyingi bosqichlarda paydo bo'ladi.
+
+**Keyingi bosqichlar** — istalgan tartibda, bittadan (har biri faqat o'z savollarini beradi, engine va api
+qayta ishga tushadi, keyin tekshiruv):
+```bash
+sudo bash /opt/agentmon/deploy/setup-vm.sh add ad       # Active Directory (3-qadam: servis hisob, guruhlar, CA)
+sudo bash /opt/agentmon/deploy/setup-vm.sh add cortex   # Cortex XDR API kaliti
+sudo bash /opt/agentmon/deploy/setup-vm.sh add ksc      # Kaspersky Security Center foydalanuvchisi
+```
+Bosqichni qayta ishga tushirsangiz sozlamalar yangilanadi (masalan, `add ad` bilan CA faylini keyin qo'shish).
+
+Boshqa buyruqlar:
+```bash
 sudo bash /opt/agentmon/deploy/setup-vm.sh update          # yangi versiya: git pull → build → ishga tushirish
-sudo RECONFIGURE=1 bash /opt/agentmon/deploy/setup-vm.sh   # sozlamalarni qaytadan kiritish (masalan, CA fayli)
+sudo RECONFIGURE=1 bash /opt/agentmon/deploy/setup-vm.sh   # 1-bosqich savollarini qaytadan berish
 sudo bash /opt/agentmon/deploy/setup-vm.sh admin-password  # favqulodda admin parolini yangilash
 ```
 Savollarsiz (avtomatik) o'rnatish: javoblarni muhit o'zgaruvchisi sifatida bering, masalan
-`sudo PROXY=http://172.25.1.10:3128 NSEL_EXPORTERS=172.25.0.1 AD_DOMAIN=corp.uz ... bash setup-vm.sh`.
+`sudo PROXY=http://172.25.1.10:3128 NSEL_EXPORTERS=172.25.0.1 USER_SUBNETS=10.10.0.0/16=Markaz bash setup-vm.sh`,
+keyin `sudo AD_DOMAIN=corp.uz AD_PASSWORD=... bash setup-vm.sh add ad`.
 Kod `main` dan boshqa branch'da bo'lsa: `AGENTMON_BRANCH=<branch>`.
 
 Skript tugagach, **7-qadamdan** davom eting (inventar va FTD). Qolgan qadamlar — qo'lda o'rnatish uchun ma'lumotnoma.

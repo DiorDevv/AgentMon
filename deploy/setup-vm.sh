@@ -7,8 +7,13 @@
 #   proxy (apt, Docker, git) → Docker → kod → .env (savol-javob) → build → ishga tushirish → firewall → tekshiruv.
 # Qayta ishga tushirish xavfsiz: bor sozlamalar saqlanadi, faqat yetishmagani so'raladi.
 #
+# Bosqichma-bosqich: avval faqat FTD (NetFlow) + web, qolgan manbalar keyin bittadan qo'shiladi.
+#
 # Foydalanish (VM'da, root huquqi bilan):
-#   sudo bash setup-vm.sh              # to'liq o'rnatish (yoki davom ettirish)
+#   sudo bash setup-vm.sh              # 1-bosqich: FTD (NetFlow) + web (yoki davom ettirish)
+#   sudo bash setup-vm.sh add ad       # keyingi bosqichlar: Active Directory,
+#   sudo bash setup-vm.sh add cortex   #   Cortex XDR,
+#   sudo bash setup-vm.sh add ksc      #   Kaspersky Security Center (istalgan tartibda)
 #   sudo bash setup-vm.sh update       # yangi kod: git pull → build → qayta ishga tushirish
 #   sudo bash setup-vm.sh check        # faqat tekshiruv (ulanishlar, servislar)
 #   sudo bash setup-vm.sh admin-password   # favqulodda admin parolini yangilash
@@ -16,7 +21,7 @@
 # Kod qayerdan olinadi (birinchisi mos kelgani):
 #   1) skript loyiha papkasi ichidan ishga tushirilgan bo'lsa — o'sha papka;
 #   2) AGENTMON_ARCHIVE=/yo'l/agentmon.tar.gz — arxivdan;
-#   3) GitHub'dan (yopiq repo — faqat o'qish huquqli fine-grained token so'raladi).
+#   3) GitHub'dan (repo yopiq bo'lsagina faqat o'qish huquqli fine-grained token so'raladi).
 #
 # Savol berilmasin desangiz, javoblarni muhit o'zgaruvchisi sifatida bering (nomlari .env dagi bilan bir xil):
 #   sudo PROXY=http://172.25.1.10:3128 NSEL_EXPORTERS=172.25.0.1 ... bash setup-vm.sh
@@ -276,8 +281,76 @@ new_admin_password() {
     env_set WEB_ADMIN_PASSWORD_HASH "$(admin_hash "$ADMIN_PASSWORD_PLAIN")"
 }
 
+# check_list NOM TUR — vergul bilan ajratilgan IP (ip) yoki subnet (net, "=Sayt" bilan ham) ro'yxatini tekshiradi
+check_list() {
+    python3 - "$1" "$2" <<'PY'
+import ipaddress, sys
+kind, value = sys.argv[2], sys.argv[1]
+for item in filter(None, (x.strip() for x in value.split(","))):
+    try:
+        if kind == "ip":
+            ipaddress.IPv4Address(item)
+        else:
+            ipaddress.IPv4Network(item.partition("=")[0].strip(), strict=False)
+    except ValueError:
+        sys.exit(f"noto'g'ri qiymat: '{item}'")
+PY
+}
+
+# ask_list NOM "savol" TUR majburiy(1/0) — ro'yxat so'raladi, formati tekshiriladi (3 urinish)
+ask_list() {
+    local name=$1 question=$2 kind=$3 required=$4 try err
+    for try in 1 2 3; do
+        ask "$name" "$question" "$(env_current "$name")"
+        [ "$kind" = ip ] && printf -v "$name" '%s' "${!name// /}"
+        if [ -z "${!name}" ]; then
+            [ "$required" = 1 ] || return 0
+            echo "  ${C_Y}majburiy qiymat${C_0}"
+        elif err=$(check_list "${!name}" "$kind" 2>&1); then
+            return 0
+        else
+            echo "  ${C_Y}$err${C_0}"
+        fi
+        unset "$name"
+    done
+    die "$name: to'g'ri qiymat kiritilmadi"
+}
+
+# Sozlanmagan (bo'sh yoki .env.example'dagi namunaviy) manbalarni o'chiradi — engine namunaviy
+# dc01.corp.local yoki namunaviy KSC paroli bilan ulanishga urinmasin. Haqiqiy sozlamalarga tegmaydi.
+disable_unconfigured() {
+    if [ -z "$(env_get AD_SERVER)" ] || [ -z "$(env_current AD_PASSWORD)" ]; then
+        for k in AD_SERVER AD_BASE_DN AD_DNS_ZONE AD_USER AD_PASSWORD AD_CA_FILE WEB_ALLOWED_GROUP WEB_ADMIN_GROUP; do
+            env_set "$k" ""
+        done
+        env_set AD_VERIFY_TLS false
+    fi
+    if [ -z "$(env_get CORTEX_FQDN)" ] || [ -z "$(env_current CORTEX_KEY)" ]; then
+        env_set CORTEX_FQDN ""; env_set CORTEX_KEY_ID ""; env_set CORTEX_KEY ""
+    fi
+    if [ -z "$(env_get KSC_URL)" ] || [ -z "$(env_current KSC_PASSWORD)" ]; then
+        env_set KSC_URL ""; env_set KSC_PASSWORD ""
+    fi
+}
+
+# PRODUCTS_ENABLED va NO_PROXY — qaysi manbalar ulanganiga qarab.
+sync_derived() {
+    local zone; zone=$(env_get AD_DNS_ZONE)
+    env_set PRODUCTS_ENABLED "$([ -n "$(env_get AD_SERVER)" ] && echo ad,)cortex,ksc,si"
+    env_set NO_PROXY "$NO_PROXY_BASE${zone:+,.$zone}"
+}
+
+sources_state() {  # qaysi manbalar ulangan — xulosa uchun
+    local s="FTD (NetFlow)"
+    [ -n "$(env_get AD_SERVER)" ] && s="$s, AD"
+    [ -n "$(env_get CORTEX_FQDN)" ] && s="$s, Cortex"
+    [ -n "$(env_get KSC_URL)" ] && s="$s, KSC"
+    printf '%s' "$s"
+}
+
+# 1-bosqich: infratuzilma + FTD (NetFlow) + web. AD, Cortex, KSC keyin: setup-vm.sh add <manba>
 configure() {
-    step "Sozlamalar (.env)"
+    step "Sozlamalar (.env) — 1-bosqich: FTD (NetFlow)"
     cd "$DIR"
     if [ ! -f .env ]; then cp .env.example .env; ok ".env yaratildi"; fi
     chmod 600 .env
@@ -311,101 +384,133 @@ configure() {
     env_set NSEL_WORKERS "$(( cpus > 8 ? 8 : cpus ))"
     ok "resurslar: ${mem_gb} GB RAM, ${cpus} CPU → Logstash $(env_get LS_JAVA_OPTS | awk '{print $2}'), Redis $(env_get REDIS_MAXMEMORY), NSEL_WORKERS=$(env_get NSEL_WORKERS)"
 
-    # Bir marta to'liq so'ralgan bo'lsa — qayta so'ralmaydi (RECONFIGURE=1 bilan qaytadan).
+    disable_unconfigured
+
+    # Bir marta so'ralgan bo'lsa — qayta so'ralmaydi (RECONFIGURE=1 bilan qaytadan).
     if [ "$(env_get AGENTMON_CONFIGURED)" = 1 ] && [ "${RECONFIGURE:-0}" != 1 ]; then
+        sync_derived
         ok "sozlamalar avval kiritilgan (qayta so'rash: sudo RECONFIGURE=1 bash $SELF)"
         return
     fi
 
     echo
-    echo "  ${C_B}Savollar${C_0} (qavs ichidagi qiymat — Enter bosilsa shu qoladi; bo'sh qoldirilgan manba ulanmaydi)"
+    echo "  ${C_B}Savollar${C_0} (qavs ichidagi qiymat — Enter bosilsa shu qoladi)"
 
     echo; echo "  ${C_B}NetFlow (FTD)${C_0}"
-    ask NSEL_EXPORTERS "FTD'lar IP'lari (flow-export interfeysi), vergul bilan" "$(env_current NSEL_EXPORTERS)"
-    env_set NSEL_EXPORTERS "${NSEL_EXPORTERS// /}"
-    ask USER_SUBNETS "Foydalanuvchi subnetlari (bo'sh = AD Sites'dan avtomatik), masalan 10.10.0.0/16=Markaz" "$(env_current USER_SUBNETS)"
-    env_set USER_SUBNETS "$USER_SUBNETS"
-    ask EXCLUDE_SUBNETS "Hisobga olinmaydigan subnetlar (printer, telefon, server VLAN)" "$(env_current EXCLUDE_SUBNETS)"
-    env_set EXCLUDE_SUBNETS "$EXCLUDE_SUBNETS"
-
-    echo; echo "  ${C_B}Active Directory${C_0}"
-    local AD_DOMAIN=${AD_DOMAIN:-}
-    ask AD_DOMAIN "Domen nomi (masalan corp.uz; AD ulanmasa — bo'sh)" "$(env_current AD_DNS_ZONE)"
-    local products="cortex,ksc,si"
-    if [ -n "$AD_DOMAIN" ]; then
-        products="ad,$products"
-        local base_dn; base_dn=$(printf 'DC=%s' "${AD_DOMAIN//./,DC=}")
-        env_set AD_BASE_DN "$base_dn"; env_set AD_DNS_ZONE "$AD_DOMAIN"
-        ask AD_SERVER "DC manzili" "$(env_current AD_SERVER | grep . || echo "ldaps://dc01.$AD_DOMAIN")"
-        env_set AD_SERVER "$AD_SERVER"
-        ask AD_USER "Servis hisob (UPN)" "$(env_current AD_USER | grep . || echo "svc_agentmon@$AD_DOMAIN")"
-        env_set AD_USER "$AD_USER"
-        local AD_PASSWORD=${AD_PASSWORD:-}
-        ask AD_PASSWORD "Servis hisob paroli" "$(env_current AD_PASSWORD)" secret
-        env_set AD_PASSWORD "$AD_PASSWORD"
-        ask WEB_ALLOWED_GROUP "Web'ga kirish guruhi (DN)" "$(env_current WEB_ALLOWED_GROUP | grep . || echo "CN=AgentMon-Users,OU=Groups,$base_dn")"
-        env_set WEB_ALLOWED_GROUP "$WEB_ALLOWED_GROUP"
-        ask WEB_ADMIN_GROUP "O'zgartirish huquqi guruhi (DN)" "$(env_current WEB_ADMIN_GROUP | grep . || echo "CN=AgentMon-Admins,OU=Groups,$base_dn")"
-        env_set WEB_ADMIN_GROUP "$WEB_ADMIN_GROUP"
-        local AD_CA=${AD_CA:-}
-        ask AD_CA "Ichki CA sertifikati fayli (PEM/CER) — DC sertifikatini tekshirish uchun (bo'sh = tekshirilmaydi)" ""
-        if [ -n "$AD_CA" ]; then
-            [ -f "$AD_CA" ] || die "CA fayli topilmadi: $AD_CA"
-            mkdir -p "$DIR/ca"
-            openssl x509 -in "$AD_CA" -out "$DIR/ca/corp-ca.pem" 2>/dev/null \
-                || openssl x509 -inform der -in "$AD_CA" -out "$DIR/ca/corp-ca.pem" 2>/dev/null \
-                || die "CA fayli PEM ham, DER ham emas: $AD_CA"
-            env_set AD_VERIFY_TLS true; env_set AD_CA_FILE /app/ca/corp-ca.pem
-            ok "CA o'rnatildi: $(openssl x509 -in "$DIR/ca/corp-ca.pem" -noout -subject)"
-        elif [ -z "$(env_get AD_CA_FILE)" ] || [ ! -f "$DIR/ca/corp-ca.pem" ]; then
-            env_set AD_VERIFY_TLS false; env_set AD_CA_FILE ""
-            warn "AD_VERIFY_TLS=false — DC sertifikati tekshirilmaydi. CA faylini keyin qo'shing: sudo RECONFIGURE=1 bash $SELF"
-        fi
+    ask_list NSEL_EXPORTERS "FTD'lar IP'lari (flow-export interfeysi), vergul bilan" ip 1
+    env_set NSEL_EXPORTERS "$NSEL_EXPORTERS"
+    local ad_on=0; [ -n "$(env_get AD_SERVER)" ] && ad_on=1
+    if [ "$ad_on" = 1 ]; then
+        ask_list USER_SUBNETS "Foydalanuvchi subnetlari (bo'sh = AD Sites'dan avtomatik), masalan 10.10.0.0/16=Markaz" net 0
     else
-        for k in AD_SERVER AD_BASE_DN AD_DNS_ZONE AD_USER AD_PASSWORD AD_CA_FILE WEB_ALLOWED_GROUP WEB_ADMIN_GROUP; do
-            env_set "$k" ""
-        done
-        env_set AD_VERIFY_TLS false
-        warn "AD ulanmadi (AD'siz rejim) — USER_SUBNETS majburiy, web'ga faqat favqulodda admin kiradi"
+        echo "  AD hali ulanmagan — foydalanuvchi subnetlari qo'lda kiritiladi (aks holda serverlar ham hisobga olinadi)"
+        ask_list USER_SUBNETS "Foydalanuvchi subnetlari, masalan 10.10.0.0/16=Markaz,10.20.0.0/16=Filial" net 1
     fi
-
-    echo; echo "  ${C_B}Cortex XDR${C_0} (Settings → Integrations → API Keys)"
-    ask CORTEX_FQDN "API manzili (https:// va / siz; bo'sh = ulanmaydi)" "$(env_current CORTEX_FQDN)"
-    CORTEX_FQDN=${CORTEX_FQDN#https://}; CORTEX_FQDN=${CORTEX_FQDN%%/*}
-    env_set CORTEX_FQDN "$CORTEX_FQDN"
-    if [ -n "$CORTEX_FQDN" ]; then
-        ask CORTEX_KEY_ID "Kalit ID" "$(env_current CORTEX_KEY_ID)"; env_set CORTEX_KEY_ID "$CORTEX_KEY_ID"
-        local CORTEX_KEY=${CORTEX_KEY:-}
-        ask CORTEX_KEY "Kalit" "$(env_current CORTEX_KEY)" secret; env_set CORTEX_KEY "$CORTEX_KEY"
-        ask CORTEX_KEY_TYPE "Kalit turi (standard/advanced)" "$(env_get CORTEX_KEY_TYPE | grep . || echo standard)"
-        env_set CORTEX_KEY_TYPE "$CORTEX_KEY_TYPE"
-    fi
-
-    echo; echo "  ${C_B}Kaspersky Security Center${C_0}"
-    ask KSC_URL "KSC OpenAPI manzili (bo'sh = ulanmaydi)" "$(env_get KSC_URL | grep . || echo https://172.25.25.111:13299)"
-    env_set KSC_URL "$KSC_URL"
-    if [ -n "$KSC_URL" ]; then
-        ask KSC_USER "Foydalanuvchi" "$(env_current KSC_USER | grep . || echo agentmon_ro)"; env_set KSC_USER "$KSC_USER"
-        local KSC_PASSWORD=${KSC_PASSWORD:-}
-        ask KSC_PASSWORD "Parol" "$(env_current KSC_PASSWORD)" secret; env_set KSC_PASSWORD "$KSC_PASSWORD"
-        ask KSC_DOMAIN "Domen hisobi bo'lsa — NetBIOS domen nomi (KSC ichki foydalanuvchisi bo'lsa bo'sh)" "$(env_get KSC_DOMAIN)"
-        env_set KSC_DOMAIN "$KSC_DOMAIN"
-        env_set KSC_INTERNAL_USER "$([ -z "$KSC_DOMAIN" ] && echo true || echo false)"
-    fi
+    env_set USER_SUBNETS "$USER_SUBNETS"
+    ask_list EXCLUDE_SUBNETS "Hisobga olinmaydigan subnetlar (printer, telefon, server VLAN; bo'sh bo'lishi mumkin)" net 0
+    env_set EXCLUDE_SUBNETS "$EXCLUDE_SUBNETS"
+    ask_list DC_IPS "Domain Controller IP'lari (ixtiyoriy — \"domen trafigi bor/yo'q\" ko'rsatkichi uchun)" ip 0
+    env_set DC_IPS "$DC_IPS"
 
     echo; echo "  ${C_B}Web interfeys${C_0}"
     local vm_ip; vm_ip=$(hostname -I | awk '{print $1}')
     ask WEB_TLS_CN "Brauzerda ochiladigan nom" "$(env_current WEB_TLS_CN | grep . || hostname -f 2>/dev/null || hostname)"
     env_set WEB_TLS_CN "$WEB_TLS_CN"
     env_set WEB_TLS_SAN "DNS:$WEB_TLS_CN,DNS:localhost,IP:$vm_ip,IP:127.0.0.1"
-    ask WEB_ALLOWED_NETS "Web'ga faqat shu tarmoqlardan kirish (IT/SOC subnetlari; bo'sh = cheklanmagan)" "$(env_get WEB_ALLOWED_NETS)"
-    env_set WEB_ALLOWED_NETS "${WEB_ALLOWED_NETS// /}"
+    ask_list WEB_ALLOWED_NETS "Web'ga faqat shu tarmoqlardan kirish (IT/SOC subnetlari; bo'sh = cheklanmagan)" net 0
+    env_set WEB_ALLOWED_NETS "$WEB_ALLOWED_NETS"
 
-    env_set PRODUCTS_ENABLED "$products"
-    env_set NO_PROXY "$NO_PROXY_ALL${AD_DOMAIN:+,.$AD_DOMAIN}"
+    sync_derived
     if [ -z "$(env_get WEB_ADMIN_PASSWORD_HASH)" ]; then new_admin_password; fi
     env_set AGENTMON_CONFIGURED 1
     ok "sozlamalar saqlandi: $DIR/.env (faqat root o'qiydi)"
+    [ "$ad_on" = 1 ] || ok "web'ga favqulodda admin bilan kiriladi (AD ulangach — AD login ham)"
+}
+
+# ------------------------------------------------------------------ keyingi bosqichlar: manba qo'shish
+configure_ad() {
+    step "Active Directory"
+    local AD_DOMAIN=${AD_DOMAIN:-}
+    ask AD_DOMAIN "Domen nomi (masalan corp.uz)" "$(env_current AD_DNS_ZONE)"
+    [ -n "$AD_DOMAIN" ] || die "domen nomi kiritilmadi"
+    local base_dn; base_dn=$(printf 'DC=%s' "${AD_DOMAIN//./,DC=}")
+    env_set AD_BASE_DN "$base_dn"; env_set AD_DNS_ZONE "$AD_DOMAIN"
+    ask AD_SERVER "DC manzili" "$(env_current AD_SERVER | grep . || echo "ldaps://dc01.$AD_DOMAIN")"
+    env_set AD_SERVER "$AD_SERVER"
+    ask AD_USER "Servis hisob (UPN)" "$(env_current AD_USER | grep . || echo "svc_agentmon@$AD_DOMAIN")"
+    env_set AD_USER "$AD_USER"
+    local AD_PASSWORD=${AD_PASSWORD:-}
+    ask AD_PASSWORD "Servis hisob paroli" "$(env_current AD_PASSWORD)" secret
+    [ -n "$AD_PASSWORD" ] || die "parol kiritilmadi"
+    env_set AD_PASSWORD "$AD_PASSWORD"
+    ask WEB_ALLOWED_GROUP "Web'ga kirish guruhi (DN)" "$(env_current WEB_ALLOWED_GROUP | grep . || echo "CN=AgentMon-Users,OU=Groups,$base_dn")"
+    env_set WEB_ALLOWED_GROUP "$WEB_ALLOWED_GROUP"
+    ask WEB_ADMIN_GROUP "O'zgartirish huquqi guruhi (DN)" "$(env_current WEB_ADMIN_GROUP | grep . || echo "CN=AgentMon-Admins,OU=Groups,$base_dn")"
+    env_set WEB_ADMIN_GROUP "$WEB_ADMIN_GROUP"
+    local AD_CA=${AD_CA:-}
+    ask AD_CA "Ichki CA sertifikati fayli (PEM/CER) — DC sertifikatini tekshirish uchun (bo'sh = tekshirilmaydi)" ""
+    if [ -n "$AD_CA" ]; then
+        [ -f "$AD_CA" ] || die "CA fayli topilmadi: $AD_CA"
+        mkdir -p "$DIR/ca"
+        openssl x509 -in "$AD_CA" -out "$DIR/ca/corp-ca.pem" 2>/dev/null \
+            || openssl x509 -inform der -in "$AD_CA" -out "$DIR/ca/corp-ca.pem" 2>/dev/null \
+            || die "CA fayli PEM ham, DER ham emas: $AD_CA"
+        env_set AD_VERIFY_TLS true; env_set AD_CA_FILE /app/ca/corp-ca.pem
+        ok "CA o'rnatildi: $(openssl x509 -in "$DIR/ca/corp-ca.pem" -noout -subject)"
+    elif [ -z "$(env_get AD_CA_FILE)" ] || [ ! -f "$DIR/ca/corp-ca.pem" ]; then
+        env_set AD_VERIFY_TLS false; env_set AD_CA_FILE ""
+        warn "AD_VERIFY_TLS=false — DC sertifikati tekshirilmaydi. CA faylini keyin qo'shing: sudo bash $SELF add ad"
+    fi
+    ok "AD sozlandi ($AD_DOMAIN)"
+}
+
+configure_cortex() {
+    step "Cortex XDR (Settings → Integrations → API Keys)"
+    ask CORTEX_FQDN "API manzili (https:// va / siz)" "$(env_current CORTEX_FQDN)"
+    CORTEX_FQDN=${CORTEX_FQDN#https://}; CORTEX_FQDN=${CORTEX_FQDN%%/*}
+    [ -n "$CORTEX_FQDN" ] || die "API manzili kiritilmadi"
+    env_set CORTEX_FQDN "$CORTEX_FQDN"
+    ask CORTEX_KEY_ID "Kalit ID" "$(env_current CORTEX_KEY_ID)"; env_set CORTEX_KEY_ID "$CORTEX_KEY_ID"
+    local CORTEX_KEY=${CORTEX_KEY:-}
+    ask CORTEX_KEY "Kalit" "$(env_current CORTEX_KEY)" secret
+    [ -n "$CORTEX_KEY" ] || die "kalit kiritilmadi"
+    env_set CORTEX_KEY "$CORTEX_KEY"
+    ask CORTEX_KEY_TYPE "Kalit turi (standard/advanced)" "$(env_get CORTEX_KEY_TYPE | grep . || echo standard)"
+    env_set CORTEX_KEY_TYPE "$CORTEX_KEY_TYPE"
+    ok "Cortex sozlandi ($CORTEX_FQDN)"
+}
+
+configure_ksc() {
+    step "Kaspersky Security Center"
+    ask KSC_URL "KSC OpenAPI manzili" "$(env_get KSC_URL | grep . || echo https://172.25.25.111:13299)"
+    [ -n "$KSC_URL" ] || die "KSC manzili kiritilmadi"
+    env_set KSC_URL "$KSC_URL"
+    ask KSC_USER "Foydalanuvchi" "$(env_current KSC_USER | grep . || echo agentmon_ro)"; env_set KSC_USER "$KSC_USER"
+    local KSC_PASSWORD=${KSC_PASSWORD:-}
+    ask KSC_PASSWORD "Parol" "$(env_current KSC_PASSWORD)" secret
+    [ -n "$KSC_PASSWORD" ] || die "parol kiritilmadi"
+    env_set KSC_PASSWORD "$KSC_PASSWORD"
+    ask KSC_DOMAIN "Domen hisobi bo'lsa — NetBIOS domen nomi (KSC ichki foydalanuvchisi bo'lsa bo'sh)" "$(env_get KSC_DOMAIN)"
+    env_set KSC_DOMAIN "$KSC_DOMAIN"
+    env_set KSC_INTERNAL_USER "$([ -z "$KSC_DOMAIN" ] && echo true || echo false)"
+    ok "KSC sozlandi ($KSC_URL)"
+}
+
+add_source() {  # add_source ad|cortex|ksc
+    local src=${1:-}
+    case "$src" in
+        ad|cortex|ksc) ;;
+        *) die "qaysi manba? sudo bash $SELF add ad | add cortex | add ksc" ;;
+    esac
+    locate_code
+    [ -f "$STATE_FILE" ] && . "$STATE_FILE"
+    [ "$(env_get AGENTMON_CONFIGURED)" = 1 ] || die "avval 1-bosqich (FTD): sudo bash $SELF"
+    cd "$DIR"
+    "configure_$src"
+    sync_derived
+    step "Engine va API qayta ishga tushirilmoqda"
+    compose up -d --force-recreate engine api >>"$LOG_FILE" 2>&1 || die "qayta ishga tushmadi (log: $LOG_FILE)"
+    ok "engine, api (NetFlow isinish davri ~10 daqiqa; inventar ~1 daqiqada sinxronlanadi)"
 }
 
 # ------------------------------------------------------------------ 5. build va ishga tushirish
@@ -454,9 +559,45 @@ tcp_check() {  # tcp_check nom host port
     if nc -z -w 5 "$2" "$3" 2>/dev/null; then ok "$1: $2:$3 ochiq"; else warn "$1: $2:$3 ga ulanib bo'lmadi (tarmoq ruxsati?)"; fi
 }
 
+check_netflow() {
+    local col
+    col=$(compose exec -T postgres psql -U agentmon -d agentmon -tAc \
+        "SELECT value FROM system_status WHERE key = 'collector'" 2>/dev/null || true)
+    if [ -z "$col" ]; then
+        echo "  (NetFlow statistikasi hali yo'q — engine ishga tushgandan ~1 daqiqa keyin: sudo bash $SELF check)"
+        return
+    fi
+    while IFS='|' read -r level msg; do
+        if [ "$level" = OK ]; then ok "$msg"; else warn "$msg"; fi
+    done < <(python3 - "$col" "$(env_get NSEL_EXPORTERS)" <<'PY'
+import json, sys
+c = json.loads(sys.argv[1])
+allowed = [x.strip() for x in sys.argv[2].split(",") if x.strip()]
+if not c.get("received"):
+    print("WARN|NetFlow hali kelmayapti — FTD'da flow-export sozlang (deploy/ftd-netflow.md)")
+else:
+    print(f"OK|NetFlow: {c['received']} ta hodisa qabul qilindi, {c.get('eps', 0)}/s, kuzatilayotgan IP: {c.get('tracked_ips', 0)}")
+    if c.get("stale"):
+        print("WARN|NetFlow to'xtagan (oxirgi: %s)" % c.get("last_rx"))
+    if not c.get("update_events_seen"):
+        print("WARN|flow-update hodisalari yo'q — FTD'da 'flow-export active refresh-interval 5' sozlanmagan (deploy/ftd-netflow.md)")
+exps = c.get("exporters") or {}
+names = {"ok": "kelyapti", "quiet": "jim (faol hostlar yo'q)", "stale": "TO'XTAGAN", "missing": "hech kelmagan"}
+for ip in allowed or sorted(exps):
+    st = (exps.get(ip) or {}).get("state", "missing" if c.get("received") else None)
+    if st is None:
+        continue
+    print(f"{'OK' if st in ('ok', 'quiet') else 'WARN'}|FTD {ip}: {names.get(st, st)}")
+if c.get("rejected"):
+    print(f"WARN|ruxsat etilmagan manbadan {c['rejected']} ta hodisa rad etildi (NSEL_EXPORTERS ni tekshiring)")
+PY
+)
+}
+
 check_all() {
     step "Tekshiruv"
     cd "$DIR"
+    check_netflow
     local ad ksc cortex proxy port h p
     ad=$(env_get AD_SERVER); ksc=$(env_get KSC_URL); cortex=$(env_get CORTEX_FQDN); proxy=$(env_get HTTPS_PROXY)
     if [ -n "$ad" ]; then
@@ -501,12 +642,21 @@ summary() {
     printf '  Papka:        %s   (sozlamalar: .env, log: %s)\n' "$DIR" "$LOG_FILE"
     printf '  Yangilash:    sudo bash %s/deploy/setup-vm.sh update\n' "$DIR"
     printf '  Tekshirish:   sudo bash %s/deploy/setup-vm.sh check\n' "$DIR"
+    printf '  Ulangan:      %s\n' "$(sources_state)"
     if [ ${#WARNINGS[@]} -gt 0 ]; then
         printf '\n%sE'"'"'tibor talab:%s\n' "$C_Y" "$C_0"
         printf '  - %s\n' "${WARNINGS[@]}"
     fi
     printf '\nKeyingi qadam: FTD'"'"'da NetFlow eksportini yoqish — %s/deploy/ftd-netflow.md\n' "$DIR"
     printf '  (manzil: %s, UDP %s; FTD interfeys IP'"'"'si NSEL_EXPORTERS da bo'"'"'lishi shart)\n' "$ip" "$(env_get NSEL_PORT | grep . || echo 2055)"
+    local next=()
+    [ -n "$(env_get AD_SERVER)" ] || next+=(ad)
+    [ -n "$(env_get CORTEX_FQDN)" ] || next+=(cortex)
+    [ -n "$(env_get KSC_URL)" ] || next+=(ksc)
+    if [ ${#next[@]} -gt 0 ]; then
+        printf '\nKeyingi bosqichlar (NetFlow kelayotgani tasdiqlangandan keyin, bittadan):\n'
+        for src in "${next[@]}"; do printf '  sudo bash %s/deploy/setup-vm.sh add %s\n' "$DIR" "$src"; done
+    fi
 }
 
 # ------------------------------------------------------------------ asosiy
@@ -526,11 +676,13 @@ main() {
             setup_proxy; get_code; configure; build_and_start; setup_firewall; check_all; summary ;;
         check)
             locate_code; check_all ;;
+        add)
+            add_source "${2:-}"; check_all; summary ;;
         admin-password)
             locate_code; new_admin_password; compose up -d --force-recreate api >>"$LOG_FILE" 2>&1
             printf 'Yangi favqulodda admin: %s / %s\n' "$(env_get WEB_ADMIN_USER)" "$ADMIN_PASSWORD_PLAIN" ;;
-        -h|--help|help) sed -n '2,24p' "$SELF" ;;
-        *) die "noma'lum rejim: $mode (install | update | check | admin-password)" ;;
+        -h|--help|help) sed -n '2,27p' "$SELF" ;;
+        *) die "noma'lum rejim: $mode (install | update | check | add <ad|cortex|ksc> | admin-password)" ;;
     esac
 }
 
