@@ -2,7 +2,7 @@ import { Activity, Radar, Shield, ShieldCheck } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../api";
 
-export function Login({ onLogin }: { onLogin: (u: string) => void }) {
+export function Login({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -13,8 +13,8 @@ export function Login({ onLogin }: { onLogin: (u: string) => void }) {
     setBusy(true);
     setError(null);
     try {
-      const r = await api<{ user: string }>("/api/login", { method: "POST", json: { username, password } });
-      onLogin(r.user);
+      await api<{ user: string }>("/api/login", { method: "POST", json: { username, password } });
+      onLogin();
     } catch (err) {
       setError((err as Error).message);
     } finally {

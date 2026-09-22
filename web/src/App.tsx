@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { api, setUnauthorizedHandler } from "./api";
+import { setProducts } from "./labels";
 import { Layout } from "./components/Layout";
 import { HostDetail } from "./pages/HostDetail";
 import { Hosts } from "./pages/Hosts";
@@ -12,15 +13,23 @@ import { Unknown } from "./pages/Unknown";
 export default function App() {
   const [user, setUser] = useState<string | null | undefined>(undefined);
 
+  // Foydalanuvchi va yoqilgan mahsulotlar ro'yxati — sahifalar chizilishidan oldin.
+  function loadMe() {
+    api<{ user: string; products?: string[] }>("/api/me")
+      .then((r) => {
+        setProducts(r.products);
+        setUser(r.user);
+      })
+      .catch(() => setUser(null));
+  }
+
   useEffect(() => {
     setUnauthorizedHandler(() => setUser(null));
-    api<{ user: string }>("/api/me")
-      .then((r) => setUser(r.user))
-      .catch(() => setUser(null));
+    loadMe();
   }, []);
 
   if (user === undefined) return <div className="skeleton" style={{ padding: 24 }}>Yuklanmoqda…</div>;
-  if (user === null) return <Login onLogin={setUser} />;
+  if (user === null) return <Login onLogin={loadMe} />;
 
   return (
     <Layout user={user} onLogout={() => setUser(null)}>

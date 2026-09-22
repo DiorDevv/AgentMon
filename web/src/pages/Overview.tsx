@@ -75,7 +75,7 @@ export function Overview() {
         />
       </div>
 
-      <div className="grid g-4 section">
+      <div className="grid g-4 section" style={{ gridTemplateColumns: `repeat(${PRODUCTS.length}, minmax(0, 1fr))` }}>
         {PRODUCTS.map((p) => (
           <ProductCard key={p} product={p} d={s.products[p]} delta={weekDelta(week?.[p])} />
         ))}

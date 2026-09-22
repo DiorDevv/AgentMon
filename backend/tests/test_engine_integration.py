@@ -197,3 +197,22 @@ async def test_restart_restores_state_and_single_instance(dsn, engine):
 
 async def _noop():
     return None
+
+
+async def test_disabled_product_is_not_evaluated(dsn, engine):
+    """AD o'chirilganda (DC trafigi ham yo'q) — hech kim "DC bilan aloqa yo'q" bo'lib qolmasligi kerak."""
+    await engine.close()
+    eng = Engine(settings(dsn, products_enabled="cortex,ksc,si", dc_ips=""))
+    await eng.start()
+    try:
+        now = await seed(eng)
+        for i in range(N):
+            eng.store.last.pop((f"10.10.0.{i + 1}", "ad"), None)   # DC trafigi umuman yo'q
+        await eng.evaluate_cycle()
+        products = {p for (_hid, p) in eng.tracked}
+        assert "ad" not in products and {"cortex", "ksc", "si"} <= products
+        assert await eng.pool.fetchval("SELECT count(*) FROM host_state WHERE product = 'ad'") == 0
+        assert now
+    finally:
+        await eng.close()
+    engine.close = _noop  # type: ignore[method-assign]

@@ -22,7 +22,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import RedisError
 
 from agentmon import db
-from agentmon.config import PRODUCTS, Settings, get_settings
+from agentmon.config import Settings, get_settings
 from agentmon.engine.classify import Classifier
 from agentmon.engine.hosts import build_hosts
 from agentmon.engine.identity import Candidate, resolve, verify
@@ -74,6 +74,7 @@ class HostRow:
 
 class Engine:
     def __init__(self, s: Settings) -> None:
+        s.products  # noqa: B018 — PRODUCTS_ENABLED noto'g'ri bo'lsa ishga tushishda darhol xato
         self.s = s
         self.pool = None
         self.redis: aioredis.Redis | None = None
@@ -491,8 +492,9 @@ class Engine:
         cands: dict[tuple[int, str], tuple[str, str | None, bool, int | None]] = {}
         alive_rows: list[tuple[int, datetime, str]] = []
         recent: set[int] = set()
-        judge_after = {p: max(s.grace, thresholds[p]) for p in PRODUCTS}
-        judgeable: dict[str, list[tuple[int, str]]] = {p: [] for p in PRODUCTS}
+        products = s.products
+        judge_after = {p: max(s.grace, thresholds[p]) for p in products}
+        judgeable: dict[str, list[tuple[int, str]]] = {p: [] for p in products}
 
         for h in self.hosts.values():
             if not h.active or h.excluded:
@@ -511,7 +513,7 @@ class Engine:
                 if alive:
                     alive_rows.append((h.id, dt(best.last_seen), best.site))
 
-            for product in PRODUCTS:
+            for product in products:
                 net_last = max((store.last.get((ip, product)) or 0 for ip in ips), default=0) or None
                 denied = max((store.last.get((ip, denied_group(product))) or 0 for ip in ips), default=0) or None
                 console = self._console_evidence(product, h.name, now_wall)

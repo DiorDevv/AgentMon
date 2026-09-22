@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from agentmon import db
 from agentmon.api import queries
 from agentmon.api.auth import COOKIE, authenticate, check_config, current_user, issue_cookie, rate_limited
-from agentmon.config import PRODUCTS, Settings, get_settings, parse_endpoints, parse_subnets
+from agentmon.config import Settings, get_settings, parse_endpoints, parse_subnets
 
 UTC = timezone.utc
 log = logging.getLogger("agentmon.api")
@@ -70,15 +70,15 @@ async def logout(response: Response):
 
 @app.get("/api/me")
 async def me(user: User, s: Settings = Depends(get_settings)):
-    return {"user": user, "auth": s.web_auth}
+    return {"user": user, "auth": s.web_auth, "products": list(s.products)}
 
 
 # ------------------------------------------------------------------ dashboard
 @app.get("/api/summary")
-async def summary(request: Request, user: User):
+async def summary(request: Request, user: User, s: Settings = Depends(get_settings)):
     p = pool(request)
-    rows = await queries.all_hosts(p)
-    out = queries.summary(rows)
+    rows = await queries.all_hosts(p, s.products)
+    out = queries.summary(rows, s.products)
     out["unknown_devices"] = await p.fetchval(
         """SELECT count(*) FROM ip_presence p
            WHERE p.last_seen > now() - interval '24 hours'
@@ -122,13 +122,16 @@ async def events(request: Request, user: User, limit: int = Query(30, ge=1, le=2
 
 
 @app.get("/api/trend")
-async def trend(request: Request, user: User, days: int = Query(30, ge=1, le=365)):
+async def trend(request: Request, user: User, days: int = Query(30, ge=1, le=365),
+                s: Settings = Depends(get_settings)):
     rows = await pool(request).fetch(
         "SELECT ts, product, state, count FROM coverage_snapshot WHERE ts > now() - make_interval(days => $1) ORDER BY ts",
         days)
-    series: dict[str, dict] = {p: {} for p in PRODUCTS}
+    series: dict[str, dict] = {p: {} for p in s.products}
     for r in rows:
-        pt = series.setdefault(r["product"], {}).setdefault(r["ts"], {"ts": r["ts"], "ok": 0, "problems": 0})
+        if r["product"] not in series:
+            continue
+        pt = series[r["product"]].setdefault(r["ts"], {"ts": r["ts"], "ok": 0, "problems": 0})
         if r["state"] == "OK":
             pt["ok"] += r["count"]
         elif r["state"] in queries.PROBLEM_STATES:
@@ -161,15 +164,16 @@ def _csv_safe(v: str) -> str:
 
 
 def host_filter(q: str = "", product: str = "", state: str = "", site: str = "", scope: str = "recent",
-                problems: bool = False, excluded: bool = False, sort: str = "problems") -> HostFilter:
-    if product and product not in PRODUCTS:
+                problems: bool = False, excluded: bool = False, sort: str = "problems",
+                s: Settings = Depends(get_settings)) -> HostFilter:
+    if product and product not in s.products:
         raise HTTPException(400, "Noma'lum mahsulot")
     return HostFilter(q=q, product=product, state=state, site=site, scope=scope, problems=problems,
                       excluded=excluded, sort=sort if sort in queries.SORTS else "problems")
 
 
 async def _filtered(request: Request, f: HostFilter) -> list[dict]:
-    rows = await queries.all_hosts(pool(request))
+    rows = await queries.all_hosts(pool(request), get_settings().products)
     out = queries.filter_hosts(rows, q=f.q, product=f.product, state=f.state, site=f.site, scope=f.scope,
                                problems_only=f.problems, include_excluded=f.excluded)
     return sorted(out, key=queries.SORTS[f.sort], reverse=f.sort == "last_alive")
@@ -184,17 +188,18 @@ async def hosts(request: Request, user: User, f: HostFilter = Depends(host_filte
 
 
 @app.get("/api/hosts.csv")
-async def hosts_csv(request: Request, user: User, f: HostFilter = Depends(host_filter)):
+async def hosts_csv(request: Request, user: User, f: HostFilter = Depends(host_filter),
+                    s: Settings = Depends(get_settings)):
     rows = await _filtered(request, f)
     buf = io.StringIO()
     buf.write("﻿")  # Excel UTF-8 ni to'g'ri ochishi uchun
     w = csv.writer(buf, delimiter=";")
-    w.writerow(["Host", "FQDN", "IP", "Sayt", "OS", "Oxirgi faollik", "AD", "Cortex XDR", "Kaspersky",
-                "SearchInform", "Izoh"])
+    names = {"ad": "AD", "cortex": "Cortex XDR", "ksc": "Kaspersky", "si": "SearchInform"}
+    w.writerow(["Host", "FQDN", "IP", "Sayt", "OS", "Oxirgi faollik", *(names[p] for p in s.products), "Izoh"])
     for h in rows:
         reasons = []
         cols = []
-        for p in PRODUCTS:
+        for p in s.products:
             st = h["states"].get(p)
             cols.append(queries.label(p, st["eff"] if st else None))
             if st and st["reason"] and st["eff"] != "OK":
@@ -214,7 +219,7 @@ async def sites(request: Request, user: User):
 
 
 @app.get("/api/hosts/{host_id}")
-async def host_detail(host_id: int, request: Request, user: User):
+async def host_detail(host_id: int, request: Request, user: User, s: Settings = Depends(get_settings)):
     p = pool(request)
     h = await p.fetchrow("SELECT * FROM host WHERE id = $1", host_id)
     if not h:
@@ -236,7 +241,7 @@ async def host_detail(host_id: int, request: Request, user: User):
         """SELECT product, state, reason, started_at, ended_at FROM host_state_history
            WHERE host_id = $1 ORDER BY started_at DESC LIMIT 200""", host_id)]
     products = {}
-    for prod in PRODUCTS:
+    for prod in s.products:
         st = states.get(prod)
         products[prod] = {
             "state": st["state"] if st else None,
@@ -345,7 +350,8 @@ async def system(request: Request, user: User, s: Settings = Depends(get_setting
                 "si": [f"{ip}:{port}" for ip, port in parse_endpoints(s.target_si)],
                 "ad_ports": s.dc_ports,
             },
-            "thresholds": s.thresholds,
+            "thresholds": {p: v for p, v in s.thresholds.items() if p in s.products},
+            "products": list(s.products),
             "alive_window": s.alive_window, "grace": s.grace, "debounce": s.debounce,
             "mass_outage_ratio": s.mass_outage_ratio, "mass_outage_min": s.mass_outage_min,
             "user_subnets_config": s.user_subnets, "exclude_subnets": s.exclude_subnets,

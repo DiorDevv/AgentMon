@@ -53,6 +53,7 @@ def _serializer(s: Settings) -> URLSafeTimedSerializer:
 
 
 def check_config(s: Settings) -> None:
+    s.products  # noqa: B018 — PRODUCTS_ENABLED noto'g'ri bo'lsa shu yerda xato beradi
     if s.web_auth not in ("ldap", "none"):
         raise RuntimeError(f"WEB_AUTH noto'g'ri: {s.web_auth!r} (ldap | none)")
     if s.web_auth == "ldap":

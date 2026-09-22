@@ -13,6 +13,9 @@ Har bir qadamda:
 
 ---
 
+> **AD hozircha ulanmayaptimi?** Tizim AD'siz ham ishlaydi — [AD'siz rejim](#adsiz-rejim-vaqtinchalik) bo'limiga qarang.
+> Bunda 3.1–3.2 qadamlar va 2-qadamdagi DC (636) ruxsati kerak emas.
+
 ## Mundarija
 
 | Bosqich | Nima qilinadi | Kim bajaradi |
@@ -680,6 +683,37 @@ docker compose logs --tail 200 engine api logstash >> /tmp/agentmon-diag.txt 2>&
 
 Bunga qo'shimcha: **Tizim holati** sahifasining skrinshoti va muammoli kompyuter sahifasining skrinshoti.
 ⚠️ Fayllarni yuborishdan oldin ichida parol yoki kalit yo'qligini tekshiring.
+
+---
+
+## AD'siz rejim (vaqtinchalik)
+
+AD ulanmaguncha tizim **Cortex XDR, Kaspersky va SearchInform** bilan ishlaydi.
+
+**`.env` da:**
+```
+PRODUCTS_ENABLED=cortex,ksc,si
+AD_SERVER=
+AD_BASE_DN=
+USER_SUBNETS=10.10.0.0/16=Markaz,10.20.0.0/16=Filial-1      # MAJBURIY
+DC_IPS=172.25.10.10,172.25.10.11                            # ixtiyoriy, lekin foydali
+WEB_ADMIN_USER=admin
+WEB_ADMIN_PASSWORD_HASH=pbkdf2_sha256:...                   # 5.3-qadam
+```
+
+**Nima o'zgaradi:**
+
+| | AD bilan | AD'siz |
+|---|---|---|
+| "AD / Domenda" ustuni | Bor | **Yo'q** (interfeysda ko'rinmaydi, hisobga kirmaydi) |
+| Kompyuterlar ro'yxati | AD + Cortex + KSC | Cortex + KSC |
+| Hech qaysi agenti yo'q kompyuter | "O'rnatilmagan" | **"Noma'lum qurilmalar"** ro'yxatida |
+| IP → kompyuter nomi | AD DNS + agentlar | Faqat agentlar xabar bergan IP |
+| Subnetlar | AD Sites'dan avtomatik | **`USER_SUBNETS` dan (qo'lda)** |
+| Web'ga kirish | AD guruhi | Faqat lokal `admin` |
+
+**Keyinchalik AD'ni qo'shish:** `.env` da AD qiymatlarini to'ldiring, `PRODUCTS_ENABLED=ad,cortex,ksc,si` qiling
+va `docker compose up -d` buyrug'ini bering. Ma'lumotlarni o'chirish kerak emas.
 
 ---
 

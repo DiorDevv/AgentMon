@@ -21,6 +21,7 @@ interface SystemData {
     debounce: number;
     mass_outage_ratio: number;
     mass_outage_min: number;
+    products: Product[];
   };
 }
 
@@ -167,7 +168,7 @@ export function System() {
                 <KV k={<ProductLabel product="cortex" />} v={<span className="mono">{cfg.targets.cortex.join(", ")}</span>} />
                 <KV k={<ProductLabel product="ksc" />} v={<span className="mono">{cfg.targets.ksc.join(", ")}</span>} />
                 <KV k={<ProductLabel product="si" />} v={<span className="mono">{cfg.targets.si.join(", ")}</span>} />
-                <KV k={<ProductLabel product="ad" />} v={<span className="mono">{data.dcs.map((d) => `${d.ip} (${d.name})`).join(", ") || "AD'dan hali olinmagan"} · port {cfg.targets.ad_ports}</span>} />
+                <KV k={<ProductLabel product="ad" />} v={<span className="mono">{data.dcs.map((d) => `${d.ip} (${d.name})`).join(", ") || (cfg.products.includes("ad") ? "AD'dan hali olinmagan" : "AD o'chirilgan (PRODUCTS_ENABLED)")} · port {cfg.targets.ad_ports}</span>} />
               </dl>
             </div>
           </div>

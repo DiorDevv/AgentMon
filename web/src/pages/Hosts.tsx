@@ -183,10 +183,10 @@ export function Hosts() {
                 );
               })}
               {data && !data.items.length && (
-                <tr><td colSpan={8}><Empty icon={SearchX}>Filtrlarga mos kompyuter topilmadi</Empty></td></tr>
+                <tr><td colSpan={4 + PRODUCTS.length}><Empty icon={SearchX}>Filtrlarga mos kompyuter topilmadi</Empty></td></tr>
               )}
               {!data && loading && (
-                <tr><td colSpan={8} style={{ padding: 20 }}><Skeleton h={320} /></td></tr>
+                <tr><td colSpan={4 + PRODUCTS.length} style={{ padding: 20 }}><Skeleton h={320} /></td></tr>
               )}
             </tbody>
           </table>

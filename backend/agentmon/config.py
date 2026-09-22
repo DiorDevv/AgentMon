@@ -4,7 +4,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Tekshiriladigan mahsulotlar. "ad" uchun tarmoq signali — DC'larga trafik.
+# Qo'llab-quvvatlanadigan mahsulotlar (tartib o'zgarmaydi). "ad" uchun tarmoq signali — DC'larga trafik.
+# Qaysilari haqiqatan tekshirilishi — PRODUCTS_ENABLED sozlamasi (Settings.products).
 PRODUCTS: tuple[str, ...] = ("ad", "cortex", "ksc", "si")
 
 
@@ -58,6 +59,8 @@ class Settings(BaseSettings):
     collector_stale: int = 180
     debounce: int = 2
     include_servers: bool = False
+    # Tekshiriladigan mahsulotlar. Masalan AD hali ulanmagan bo'lsa: cortex,ksc,si
+    products_enabled: str = "ad,cortex,ksc,si"
 
     flush_interval: int = 30
     eval_interval: int = 60
@@ -95,6 +98,16 @@ class Settings(BaseSettings):
     web_admin_password_hash: str = ""
     web_session_hours: int = 12
     web_cookie_secure: bool = False   # HTTPS orqali ochilsa true qiling
+
+    @property
+    def products(self) -> tuple[str, ...]:
+        wanted = {p.lower() for p in split_csv(self.products_enabled)}
+        unknown = wanted - set(PRODUCTS)
+        if unknown:
+            raise ValueError(f"PRODUCTS_ENABLED: noma'lum mahsulot {sorted(unknown)} (mumkin: {', '.join(PRODUCTS)})")
+        if not wanted:
+            raise ValueError("PRODUCTS_ENABLED bo'sh — kamida bitta mahsulot kerak")
+        return tuple(p for p in PRODUCTS if p in wanted)
 
     @property
     def thresholds(self) -> dict[str, int]:

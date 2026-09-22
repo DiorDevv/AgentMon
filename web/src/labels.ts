@@ -1,6 +1,14 @@
 import type { Product, State } from "./types";
 
-export const PRODUCTS: Product[] = ["ad", "cortex", "ksc", "si"];
+export const ALL_PRODUCTS: Product[] = ["ad", "cortex", "ksc", "si"];
+
+// Yoqilgan mahsulotlar (PRODUCTS_ENABLED) — /api/me javobidan, ilova chizilishidan oldin o'rnatiladi.
+// `let` eksporti "jonli" bog'lanish: import qilgan modullar yangilangan qiymatni ko'radi.
+export let PRODUCTS: Product[] = [...ALL_PRODUCTS];
+export function setProducts(list: string[] | undefined) {
+  const wanted = new Set(list ?? ALL_PRODUCTS);
+  PRODUCTS = ALL_PRODUCTS.filter((p) => wanted.has(p));
+}
 
 export const PRODUCT_NAMES: Record<Product, string> = {
   ad: "Active Directory",

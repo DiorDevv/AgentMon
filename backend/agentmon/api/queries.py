@@ -59,7 +59,7 @@ def invalidate() -> None:
     _cache.at = 0.0
 
 
-async def all_hosts(pool: asyncpg.Pool) -> list[dict]:
+async def all_hosts(pool: asyncpg.Pool, products: tuple[str, ...] = PRODUCTS) -> list[dict]:
     if _cache.rows is not None and time.monotonic() - _cache.at < CACHE_TTL:
         return _cache.rows
     rows = await pool.fetch(
@@ -76,7 +76,7 @@ async def all_hosts(pool: asyncpg.Pool) -> list[dict]:
     for r in rows:
         states = {}
         problems = []
-        for p in PRODUCTS:
+        for p in products:
             st = r["states"].get(p)
             if not st:
                 states[p] = None
@@ -136,10 +136,10 @@ SORTS = {
 }
 
 
-def summary(rows: list[dict]) -> dict:
+def summary(rows: list[dict], products: tuple[str, ...] = PRODUCTS) -> dict:
     scope = [h for h in rows if h["recent"] and not h["excluded"]]
-    products = {}
-    for p in PRODUCTS:
+    per_product = {}
+    for p in products:
         counts: dict[str, int] = {}
         for h in scope:
             st = h["states"].get(p)
@@ -147,7 +147,7 @@ def summary(rows: list[dict]) -> dict:
             counts[key] = counts.get(key, 0) + 1
         judged = sum(n for k, n in counts.items() if k not in (PENDING, OFFLINE, "NONE"))
         ok = counts.get(OK, 0)
-        products[p] = {
+        per_product[p] = {
             "counts": counts,
             "ok": ok,
             "problems": sum(counts.get(s, 0) for s in PROBLEM_STATES),
@@ -157,7 +157,7 @@ def summary(rows: list[dict]) -> dict:
     sites: dict[str, dict] = {}
     for h in scope:
         s = sites.setdefault(h["site"] or "—", {"site": h["site"] or "—", "hosts": 0, "problem_hosts": 0,
-                                                **{p: 0 for p in PRODUCTS}})
+                                                **{p: 0 for p in products}})
         s["hosts"] += 1
         if h["problems"]:
             s["problem_hosts"] += 1
@@ -175,6 +175,6 @@ def summary(rows: list[dict]) -> dict:
         "hosts_recent": len(scope),
         "hosts_online": sum(1 for h in scope if h["online"]),
         "hosts_with_problems": sum(1 for h in scope if h["problems"]),
-        "products": products,
+        "products": per_product,
         "sites": sorted(sites.values(), key=lambda s: (-s["problem_hosts"], s["site"])),
     }

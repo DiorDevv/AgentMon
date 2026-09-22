@@ -97,3 +97,28 @@ def test_check_config_rejects_bad_setup(monkeypatch):
     with pytest.raises(RuntimeError, match="WEB_AUTH"):
         auth.check_config(Settings(_env_file=None, web_auth="kerberos"))
     auth.check_config(Settings(_env_file=None, web_auth="none"))
+
+
+async def test_only_enabled_products_returned(dsn, monkeypatch, client):
+    monkeypatch.setenv("PRODUCTS_ENABLED", "cortex,ksc,si")
+    get_settings.cache_clear()
+    queries.invalidate()
+    await client.post("/api/login", json={"username": "admin", "password": "Maxfiy-123"})
+    me = (await client.get("/api/me")).json()
+    assert me["products"] == ["cortex", "ksc", "si"]
+    s = (await client.get("/api/summary")).json()
+    assert set(s["products"]) == {"cortex", "ksc", "si"}
+    assert (await client.get("/api/hosts?product=ad")).status_code == 400
+    header = (await client.get("/api/hosts.csv")).text.splitlines()[0]
+    assert "AD" not in header.split(";") and "Kaspersky" in header
+    sysinfo = (await client.get("/api/system")).json()
+    assert set(sysinfo["config"]["thresholds"]) == {"cortex", "ksc", "si"}
+
+
+def test_products_setting_validation():
+    from agentmon.config import Settings
+    assert Settings(_env_file=None, products_enabled="SI, cortex").products == ("cortex", "si")
+    with pytest.raises(ValueError, match="noma'lum"):
+        Settings(_env_file=None, products_enabled="cortex,edr").products
+    with pytest.raises(ValueError, match="bo'sh"):
+        Settings(_env_file=None, products_enabled=" , ").products
