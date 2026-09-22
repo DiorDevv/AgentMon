@@ -3,3 +3,8 @@ __pycache__/
 .pytest_cache/
 node_modules/
 web/dist/
+
+# NetFlow namunalari (ichki IP manzillar) — hech qachon push qilinmasin
+samples/
+*.pcap
+*.pcapng
