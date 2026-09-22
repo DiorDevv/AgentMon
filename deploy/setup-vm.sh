@@ -238,7 +238,8 @@ get_code() {
         ok "yangilandi: $(git -C "$DIR" log --oneline -1)"
         return
     fi
-    if [ ! -s "$GIT_CRED_FILE" ]; then
+    # Repo ochiq bo'lsa token kerak emas; yopiq bo'lsagina so'raladi.
+    if [ ! -s "$GIT_CRED_FILE" ] && ! GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote -q "$REPO_URL" HEAD >/dev/null 2>&1; then
         echo "  Repo yopiq. GitHub → Settings → Developer settings → Fine-grained tokens:"
         echo "    Repository access: faqat AgentMon;  Permissions → Contents: Read-only"
         local GITHUB_TOKEN=${GITHUB_TOKEN:-}
@@ -249,7 +250,7 @@ get_code() {
         chmod 600 "$GIT_CRED_FILE"
     fi
     git clone -q --branch "$BRANCH" "$REPO_URL" "$DIR" >>"$LOG_FILE" 2>&1 \
-        || { rm -f "$GIT_CRED_FILE"; die "klonlab bo'lmadi: token noto'g'ri yoki repo/branch ($BRANCH) yo'q. Log: $LOG_FILE"; }
+        || { [ -s "$GIT_CRED_FILE" ] && rm -f "$GIT_CRED_FILE"; die "klonlab bo'lmadi: token noto'g'ri yoki repo/branch ($BRANCH) yo'q. Log: $LOG_FILE"; }
     ok "klonlandi: $DIR ($(git -C "$DIR" log --oneline -1))"
 }
 
